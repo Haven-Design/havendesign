@@ -1,0 +1,16 @@
+<form method="POST" enctype="multipart/form-data">
+    <input type="file" name="file" required><br><br>
+
+    <label><input type="checkbox" name="redact_type" value="ALL"> All</label><br>
+    <label><input type="checkbox" name="redact_type" value="NAMES"> Names</label><br>
+    <label><input type="checkbox" name="redact_type" value="EMAILS"> Emails</label><br>
+    <label><input type="checkbox" name="redact_type" value="PHONES"> Phone Numbers</label><br>
+    <label><input type="checkbox" name="redact_type" value="SSN"> Social Security Numbers</label><br>
+    <label><input type="checkbox" name="redact_type" value="DATES"> Dates</label><br>
+
+    <br>
+    <label for="custom_inputs">Custom Redaction (comma-separated):</label><br>
+    <input type="text" name="custom_inputs" id="custom_inputs"><br><br>
+
+    <button type="submit">Redact PDF</button>
+</form>
