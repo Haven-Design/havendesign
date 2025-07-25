@@ -63,7 +63,7 @@ if uploaded_file and search_terms:
                 # Redact selected matches
                 for term, page_num in selected_to_redact:
                     page = doc[page_num]
-                    text_instances = page.search_for(term, flags=fitz.TEXT_DEHYPHENATE | fitz.TEXT_IGNORECASE)
+                    text_instances = page.search_for(term, flags=fitz.TEXT_DEHYPHENATE)
                     for inst in text_instances:
                         page.add_redact_annot(inst, fill=(0, 0, 0))
                     page.apply_redactions()
