@@ -1,82 +1,101 @@
 import streamlit as st
 import fitz  # PyMuPDF
+import io
 import re
-import os
 
-st.set_page_config(page_title="PDF Redactor", layout="wide")
+# --------------------
+# Sidebar
+# --------------------
+st.sidebar.title("Redaction Settings")
 
-st.title("🔍 PDF Redactor Tool")
+# Pattern checkboxes
+redact_ssn = st.sidebar.checkbox("Social Security Numbers")
+redact_dates = st.sidebar.checkbox("Dates")
+redact_names = st.sidebar.checkbox("Names")
+redact_emails = st.sidebar.checkbox("Email Addresses")
+redact_phones = st.sidebar.checkbox("Phone Numbers")
+redact_cc = st.sidebar.checkbox("Credit Card Numbers")
+redact_all = st.sidebar.checkbox("Select All")
 
-# Upload PDF
-uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
+if redact_all:
+    redact_ssn = redact_dates = redact_names = redact_emails = redact_phones = redact_cc = True
 
-# Search terms input
-search_terms = st.text_area(
-    "Enter search terms (one per line):",
-    height=150,
-    placeholder="Example:\nSocial Security Number\nConfidential\nJohn Doe"
-)
+# --------------------
+# Main App
+# --------------------
+st.title("PDF Redactor")
 
-if uploaded_file and search_terms:
-    # Save uploaded PDF to temp file
-    temp_file_path = os.path.join("temp_uploaded.pdf")
-    with open(temp_file_path, "wb") as f:
-        f.write(uploaded_file.read())
+uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
 
-    # Load PDF
-    doc = fitz.open(temp_file_path)
+custom_terms = st.text_area("Custom Terms to Redact (comma or newline separated)", height=100)
 
-    # Extract text from all pages
-    all_text = ""
-    page_texts = []
+if uploaded_file and st.button("Redact and Preview"):
+
+    # Load the PDF
+    pdf_bytes = uploaded_file.read()
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    # Collect all search terms
+    terms = []
+
+    if custom_terms:
+        for line in custom_terms.splitlines():
+            terms.extend([term.strip() for term in line.split(",") if term.strip()])
+
+    # Define regex patterns
+    patterns = []
+
+    if redact_ssn:
+        patterns.append(r"\b\d{3}-\d{2}-\d{4}\b")
+    if redact_dates:
+        patterns.append(r"\b(?:\d{1,2}[/-])?\d{1,2}[/-]\d{2,4}\b")  # Dates like 01/01/2020 or 1-1-20
+    if redact_names:
+        terms.extend(["John", "Emily"])  # Add more names as needed
+    if redact_emails:
+        patterns.append(r"\b[\w.-]+@[\w.-]+\.\w+\b")
+    if redact_phones:
+        patterns.append(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
+    if redact_cc:
+        patterns.append(r"\b(?:\d[ -]*?){13,16}\b")
+
+    # Go through all pages and apply redactions
     for page in doc:
-        text = page.get_text()
-        page_texts.append(text)
-        all_text += text + "\n"
-
-    # Search for terms
-    terms = [term.strip() for term in search_terms.splitlines() if term.strip()]
-    patterns = [(re.escape(term), term) for term in terms]
-
-    match_data = []
-    for i, text in enumerate(page_texts):
-        for pattern, original_term in patterns:
-            matches = list(re.finditer(pattern, text, re.IGNORECASE))
+        # Search for literal terms
+        for term in terms:
+            matches = page.search_for(term, flags=fitz.TEXT_DEHYPHENATE | fitz.TEXT_IGNORECASE)
             for match in matches:
-                snippet = text[max(0, match.start() - 30): match.end() + 30].replace('\n', ' ')
-                match_data.append({
-                    "page": i,
-                    "term": original_term,
-                    "context": snippet,
-                })
+                page.add_redact_annot(match, fill=(0, 0, 0))
 
-    if match_data:
-        st.write("### 🔎 Found Matches:")
-        selected_to_redact = []
-        for match in match_data:
-            key = f"{match['page']}-{match['term']}-{match['context'][:20]}"
-            if st.checkbox(f"Page {match['page'] + 1}: '{match['term']}' in \"...{match['context']}...\"", key=key):
-                selected_to_redact.append((match['term'], match['page']))
+        # Search for regex patterns
+        text = page.get_text()
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                matched_text = match.group()
+                rects = page.search_for(matched_text)
+                for rect in rects:
+                    page.add_redact_annot(rect, fill=(0, 0, 0))
 
-        if selected_to_redact:
-            if st.button("Redact and Download"):
-                # Redact selected matches
-                for term, page_num in selected_to_redact:
-                    page = doc[page_num]
-                    text_instances = page.search_for(term, flags=fitz.TEXT_DEHYPHENATE)
-                    for inst in text_instances:
-                        page.add_redact_annot(inst, fill=(0, 0, 0))
-                    page.apply_redactions()
+    # Apply redactions
+    doc.apply_redactions()
 
-                redacted_path = "redacted_output.pdf"
-                doc.save(redacted_path)
-                with open(redacted_path, "rb") as f:
-                    st.download_button("📥 Download Redacted PDF", f, file_name="redacted.pdf")
+    # Save redacted PDF to buffer
+    redacted_pdf_bytes = io.BytesIO()
+    doc.save(redacted_pdf_bytes)
+    doc.close()
 
-                doc.close()
-                os.remove(temp_file_path)
-                os.remove(redacted_path)
-    else:
-        st.info("No matches found.")
-elif uploaded_file and not search_terms:
-    st.warning("Please enter at least one search term.")
+    st.success("Redaction complete!")
+    st.download_button(
+        label="Download Redacted PDF",
+        data=redacted_pdf_bytes.getvalue(),
+        file_name="redacted_output.pdf",
+        mime="application/pdf"
+    )
+
+    # Optional: Preview
+    st.subheader("Preview")
+    st.info("Preview shows first 2 pages of redacted PDF.")
+    preview_doc = fitz.open(stream=redacted_pdf_bytes.getvalue(), filetype="pdf")
+    for page in preview_doc[:2]:
+        pix = page.get_pixmap()
+        st.image(pix.tobytes("png"))
+    preview_doc.close()
