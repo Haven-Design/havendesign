@@ -3,67 +3,61 @@ import fitz  # PyMuPDF
 import io
 import re
 
-st.set_page_config(page_title="PDF Redactor", layout="wide")
-st.title("🔒 PDF Redactor")
+st.title("PDF Redactor")
 
-uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
+uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
+custom_terms = st.text_input("Custom terms to redact (comma-separated)")
 
-st.markdown("### What would you like to redact?")
-redact_names = st.checkbox("Names (case-insensitive)")
-redact_ssn = st.checkbox("Social Security Numbers (XXX-XX-XXXX)")
-redact_emails = st.checkbox("Email addresses")
-redact_phone = st.checkbox("Phone numbers")
-custom_terms = st.text_input("Custom words/phrases to redact (comma-separated)")
+# Redaction options
+st.markdown("### Redaction Options")
+redact_names = st.checkbox("Names", value=True)
+redact_ssn = st.checkbox("Social Security Numbers", value=True)
+redact_email = st.checkbox("Email Addresses", value=True)
+redact_phone = st.checkbox("Phone Numbers", value=True)
+redact_credit_card = st.checkbox("Credit Card Numbers", value=True)
+redact_dates = st.checkbox("Dates (MM/DD/YYYY)", value=True)
+redact_addresses = st.checkbox("Addresses (Street-like)", value=True)
 
-if st.button("Redact PDF"):
-    if uploaded_file is not None:
-        pdf_data = uploaded_file.read()
-        doc = fitz.open(stream=pdf_data, filetype="pdf")
+patterns = []
 
-        custom_list = [term.strip().lower() for term in custom_terms.split(",") if term.strip()]
-        regex_patterns = []
+if redact_ssn:
+    patterns.append(r"\b\d{3}-\d{2}-\d{4}\b")
+if redact_email:
+    patterns.append(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
+if redact_phone:
+    patterns.append(r"\b(?:\+?1\s*[-.\(]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b")
+if redact_credit_card:
+    patterns.append(r"\b(?:\d[ -]*?){13,16}\b")
+if redact_dates:
+    patterns.append(r"\b(?:0?[1-9]|1[0-2])[\/\-\.](?:0?[1-9]|[12][0-9]|3[01])[\/\-\.](?:\d{2}|\d{4})\b")
+if redact_addresses:
+    patterns.append(r"\b\d{1,5}\s(?:[A-Za-z0-9]+\s){1,5}(Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Lane|Ln|Drive|Dr|Court|Ct)\b")
 
-        if redact_names:
-            custom_list.extend(["john", "emily"])  # Add known names for redaction
+if redact_names and custom_terms:
+    names = [name.strip() for name in custom_terms.split(',')]
+    patterns.extend([re.escape(name) for name in names])
+elif custom_terms:
+    terms = [term.strip() for term in custom_terms.split(',')]
+    patterns.extend([re.escape(term) for term in terms])
 
-        if redact_ssn:
-            regex_patterns.append(r"\b\d{3}-\d{2}-\d{4}\b")
-
-        if redact_emails:
-            regex_patterns.append(r"\b[\w\.-]+@[\w\.-]+\.\w+\b")
-
-        if redact_phone:
-            regex_patterns.append(r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b")
+if uploaded_file and st.button("Redact PDF"):
+    try:
+        doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
 
         for page in doc:
-            page_text = page.get_text().lower()
-
-            # Case-insensitive string redaction
-            for term in custom_list:
-                if term:
-                    matches = page.search_for(term, flags=fitz.TEXT_DEHYPHENATE)
-                    for match in matches:
-                        page.add_redact_annot(match, fill=(0, 0, 0))
-
-            # Regex redaction
-            for pattern in regex_patterns:
-                for match in re.finditer(pattern, page_text):
-                    start, end = match.span()
-                    redaction_text = page.get_textpage().text()[start:end]
-                    if redaction_text:
-                        highlight_areas = page.search_for(redaction_text)
-                        for area in highlight_areas:
-                            page.add_redact_annot(area, fill=(0, 0, 0))
-
+            page_text = page.get_text()
+            for pattern in patterns:
+                matches = re.findall(pattern, page_text, re.IGNORECASE)
+                for match in set(matches):
+                    areas = page.search_for(match, flags=fitz.TEXT_IGNORECASE)
+                    for area in areas:
+                        page.add_redact_annot(area, fill=(0, 0, 0))
             page.apply_redactions()
 
-        redacted_pdf = io.BytesIO()
-        doc.save(redacted_pdf)
-        st.download_button(
-            label="📥 Download Redacted PDF",
-            data=redacted_pdf.getvalue(),
-            file_name="redacted_output.pdf",
-            mime="application/pdf"
-        )
-    else:
-        st.warning("Please upload a PDF first.")
+        output = io.BytesIO()
+        doc.save(output)
+        st.download_button("Download Redacted PDF", output.getvalue(), file_name="redacted.pdf")
+
+    except Exception as e:
+        st.error("Something went wrong during redaction.")
+        st.exception(e)
