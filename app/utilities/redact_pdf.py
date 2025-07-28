@@ -1,6 +1,7 @@
 import fitz  # PyMuPDF
 import spacy
 import re
+import tempfile
 from typing import List
 
 nlp = spacy.load("en_core_web_sm")
@@ -11,6 +12,17 @@ phone_pattern = r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}"
 ssn_pattern = r"\b\d{3}-\d{2}-\d{4}\b"
 credit_card_pattern = r"\b(?:\d[ -]*?){13,16}\b"
 number_pattern = r"\b\d{5,}\b"
+
+# Map UI labels to internal tags
+option_to_entity = {
+    "Names": "PERSON",
+    "Addresses": "GPE",
+    "Dates": "DATE",
+    "Phone Numbers": "PHONE",
+    "SSNs": "SSN",
+    "Credit Card Numbers": "CC",
+    "Numbers": "NUMBER"
+}
 
 
 def get_matches(text: str, enabled_entities: List[str]) -> List[dict]:
@@ -44,7 +56,9 @@ def get_matches(text: str, enabled_entities: List[str]) -> List[dict]:
     return matches
 
 
-def redact_pdf(input_path: str, output_path: str, enabled_entities: List[str]) -> None:
+def redact_pdf(input_path: str, selected_options: List[str]) -> str:
+    enabled_entities = [option_to_entity[opt] for opt in selected_options if opt in option_to_entity]
+
     doc = fitz.open(input_path)
 
     for page in doc:
@@ -60,5 +74,9 @@ def redact_pdf(input_path: str, output_path: str, enabled_entities: List[str]) -
 
         page.apply_redactions()
 
-    doc.save(output_path)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_output:
+        doc.save(tmp_output.name)
+        output_path = tmp_output.name
+
     doc.close()
+    return output_path
