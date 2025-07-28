@@ -1,85 +1,62 @@
 import streamlit as st
 import fitz  # PyMuPDF
+import io
 import re
-from io import BytesIO
+from PIL import Image
 
-st.set_page_config(page_title="PDF Redactor", layout="wide")
+st.set_page_config(page_title="PDF Redactor", layout="centered")
+st.title("🔐 PDF Redactor")
 
-st.title("PDF Redactor")
+st.markdown("Redact sensitive information like names, emails, and dates from your PDF.")
 
-uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
+uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
-# Checkbox options
-st.subheader("Select the types of data to redact:")
-select_all = st.checkbox("Select All")
+if uploaded_file:
+    pdf_bytes = uploaded_file.read()
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-option_names = {
-    "Names": r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b",
-    "SSNs": r"\b\d{3}-\d{2}-\d{4}\b",
-    "Emails": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-    "Phone Numbers": r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
-    "Dates": r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4})\b",
-}
+    st.subheader("Preview PDF")
+    pdf_to_images = []
+    for page in doc:
+        pix = page.get_pixmap()
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        pdf_to_images.append(img)
 
-# Keep track of selected types
-selected_options = {
-    label: st.checkbox(label, value=select_all)
-    for label in option_names
-}
+    for i, image in enumerate(pdf_to_images):
+        st.image(image.resize((600, 800)), caption=f"Page {i + 1}", use_container_width=True)
 
-custom_terms_input = st.text_input("Custom terms to redact (comma separated)")
+    st.subheader("Choose What to Redact")
+    redact_names = st.checkbox("Names (e.g., John Smith)")
+    redact_emails = st.checkbox("Email Addresses")
+    redact_dates = st.checkbox("Dates (e.g., July 8, 2023)")
 
-if st.button("Redact PDF") and uploaded_file:
-    try:
-        file_bytes = uploaded_file.read()
-        pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
+    if st.button("Redact PDF"):
+        with st.spinner("Redacting..."):
+            name_pattern = r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b"
+            email_pattern = r"[\w\.-]+@[\w\.-]+"
+            date_patterns = [
+                r'\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)(?:\s+\d{1,2})(?:,\s*\d{4})?',
+                r'\b\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)(?:,\s*\d{4})?'
+            ]
 
-        # Build redaction pattern list
-        patterns = []
+            for page in doc:
+                text = page.get_text()
+                if redact_names:
+                    for match in re.findall(name_pattern, text):
+                        for inst in page.search_for(match):
+                            page.add_redact_annot(inst, fill=(0, 0, 0))
+                if redact_emails:
+                    for match in re.findall(email_pattern, text):
+                        for inst in page.search_for(match):
+                            page.add_redact_annot(inst, fill=(0, 0, 0))
+                if redact_dates:
+                    for pattern in date_patterns:
+                        for match in re.findall(pattern, text):
+                            for inst in page.search_for(match):
+                                page.add_redact_annot(inst, fill=(0, 0, 0))
 
-        for label, selected in selected_options.items():
-            if selected:
-                patterns.append(option_names[label])
+            doc.apply_redactions()
+            redacted_bytes = doc.write()
 
-        # Add custom terms
-        if custom_terms_input.strip():
-            custom_terms = [term.strip() for term in custom_terms_input.split(",")]
-            for term in custom_terms:
-                # Escape special characters unless it's a regex
-                if not re.match(r"^[\[\]\\^$.|?*+(){}]", term):
-                    term = re.escape(term)
-                patterns.append(fr"\b{term}\b")
-
-        combined_pattern = "|".join(patterns)
-        regex = re.compile(combined_pattern, re.IGNORECASE)
-
-        redacted_pdf = fitz.open()
-
-        progress_bar = st.progress(0, text="Redacting...")
-
-        for page_num, page in enumerate(pdf_doc):
-            text_instances = regex.finditer(page.get_text())
-            for match in text_instances:
-                rects = page.search_for(match.group(), quads=True)
-                for rect in rects:
-                    page.add_redact_annot(rect.rect, fill=(0, 0, 0))
-            page.apply_redactions()
-            redacted_pdf.insert_pdf(pdf_doc, from_page=page_num, to_page=page_num)
-            progress_bar.progress((page_num + 1) / len(pdf_doc), text=f"Redacting page {page_num + 1}")
-
-        # Save redacted PDF to memory
-        redacted_bytes = redacted_pdf.write()
-
-        st.success("Redaction complete!")
-
-        # Show preview of the first page
-        st.subheader("Preview:")
-        preview_page = redacted_pdf.load_page(0)
-        pix = preview_page.get_pixmap(matrix=fitz.Matrix(2, 2))
-        st.image(pix.tobytes("png"), use_column_width=True)
-
-        st.download_button("Download Redacted PDF", data=redacted_bytes, file_name="redacted.pdf")
-
-    except Exception as e:
-        st.error("Something went wrong during redaction.")
-        st.exception(e)
+            st.success("Redaction complete!")
+            st.download_button("Download Redacted PDF", redacted_bytes, file_name="redacted.pdf", mime="application/pdf")
