@@ -1,64 +1,53 @@
-import fitz  # PyMuPDF
-import re
-import spacy
-from typing import List
+import streamlit as st
+import tempfile
+import os
+from utilities.redact_pdf import redact_pdf
 
-# Load spaCy model with NER	nlp = spacy.load("en_core_web_sm")
+st.set_page_config(page_title="PDF Redactor", layout="wide")
 
-# Regular expressions for pattern-based detection
-PATTERNS = {
-    "PHONE": re.compile(r"(\+?\d{1,2}[\s-]?)?(\(?\d{3}\)?[\s-]?)?\d{3}[\s-]?\d{4}"),
-    "SSN": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
-    "CREDIT_CARD": re.compile(r"(?:\d[ -]*?){13,16}"),
-    "DATE": re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\w+ \d{1,2}, \d{4})\b")
-}
+st.title("PDF Redactor")
 
-# Entity labels to look for from spaCy
-ENTITY_LABELS = {
-    "PERSON": "PERSON",
-    "GPE": "GPE",
-    "DATE": "DATE",
-    "ORG": "ORG",
-    "LOC": "LOC",
-    "ADDRESS": "ADDRESS"
-}
+uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
 
-def find_sensitive_data(text: str, redact_types: List[str]) -> List[str]:
-    sensitive = set()
-    doc = nlp(text)
+st.markdown("### Select what to redact:")
 
-    # Named Entity Recognition
-    if any(k in redact_types for k in ENTITY_LABELS):
-        for ent in doc.ents:
-            if ent.label_ in redact_types:
-                sensitive.add(ent.text.strip())
+options = [
+    "Names",
+    "Addresses",
+    "Dates",
+    "Phone Numbers",
+    "Numbers",
+    "SSNs",
+    "Credit Card Numbers",
+]
 
-    # Regex-based matches
-    if "PHONE" in redact_types:
-        sensitive.update(PATTERNS["PHONE"].findall(text))
-    if "SSN" in redact_types:
-        sensitive.update(PATTERNS["SSN"].findall(text))
-    if "CREDIT_CARD" in redact_types:
-        sensitive.update(PATTERNS["CREDIT_CARD"].findall(text))
-    if "DATE" in redact_types:
-        sensitive.update(PATTERNS["DATE"].findall(text))
+all_selected = st.checkbox("Select All")
 
-    # Normalize and clean
-    return [s for s in sensitive if s.strip() != ""]
+if all_selected:
+    selected_options = options
+else:
+    selected_options = [opt for opt in options if st.checkbox(opt)]
 
-def redact_pdf(input_path: str, output_path: str, redact_types: List[str]) -> None:
-    doc = fitz.open(input_path)
+if uploaded_file and selected_options:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_input:
+        tmp_input.write(uploaded_file.read())
+        tmp_input_path = tmp_input.name
 
-    for page in doc:
-        text = page.get_text()
-        sensitive_items = find_sensitive_data(text, redact_types)
+    with st.spinner("Redacting PDF..."):
+        output_path = redact_pdf(tmp_input_path, selected_options)
 
-        for item in sensitive_items:
-            text_instances = page.search_for(item, quads=True)
-            for inst in text_instances:
-                page.add_redact_annot(inst.rect, fill=(0, 0, 0))
+    with open(output_path, "rb") as f:
+        st.download_button(
+            label="Download Redacted PDF",
+            data=f,
+            file_name="redacted.pdf",
+            mime="application/pdf"
+        )
 
-        page.apply_redactions()
+    st.markdown("### Preview:")
+    st.pdf(output_path, use_container_width=True)
 
-    doc.save(output_path)
-    doc.close()
+    os.remove(tmp_input_path)
+    os.remove(output_path)
+elif uploaded_file and not selected_options:
+    st.info("Please select at least one option to redact.")

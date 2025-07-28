@@ -1,29 +1,64 @@
+import fitz  # PyMuPDF
+import spacy
 import re
-from io import BytesIO
-from PyPDF2 import PdfReader, PdfWriter
+from typing import List
 
-def redact_text(text, redact_names, redact_addresses, redact_dates):
-    if redact_names:
-        text = re.sub(r"\b[A-Z][a-z]+\s[A-Z][a-z]+\b", "[REDACTED NAME]", text)
-    if redact_addresses:
-        text = re.sub(r"\d{1,5}\s\w+\s(?:Street|St|Avenue|Ave|Rd|Road|Blvd|Lane|Ln|Drive|Dr)\b", "[REDACTED ADDRESS]", text)
-    if redact_dates:
-        text = re.sub(r"\b(?:\d{1,2}[/-])?\d{1,2}[/-]\d{2,4}\b", "[REDACTED DATE]", text)
-        text = re.sub(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b", "[REDACTED DATE]", text)
-    return text
+nlp = spacy.load("en_core_web_sm")
 
-def redact_pdf(pdf_bytes, pages_to_redact, redact_names, redact_addresses, redact_dates):
-    reader = PdfReader(BytesIO(pdf_bytes))
-    writer = PdfWriter()
+# Regex patterns for sensitive info
+date_pattern = r"\b(?:\d{1,2}[/-])?(?:\d{1,2}[/-])?\d{2,4}\b"
+phone_pattern = r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}"
+ssn_pattern = r"\b\d{3}-\d{2}-\d{4}\b"
+credit_card_pattern = r"\b(?:\d[ -]*?){13,16}\b"
+number_pattern = r"\b\d{5,}\b"
 
-    for i, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
-        if i in pages_to_redact:
-            redacted_text = redact_text(text, redact_names, redact_addresses, redact_dates)
-            page.clear_text()
-            page.add_text(redacted_text)  # This may require external lib if you're adding visual overlays
-        writer.add_page(page)
 
-    output = BytesIO()
-    writer.write(output)
-    return output.getvalue()
+def get_matches(text: str, enabled_entities: List[str]) -> List[dict]:
+    doc = nlp(text)
+    matches = []
+
+    for ent in doc.ents:
+        if ent.label_ in enabled_entities:
+            matches.append({"text": ent.text, "start": ent.start_char, "end": ent.end_char})
+
+    if "DATE" in enabled_entities:
+        for match in re.finditer(date_pattern, text):
+            matches.append({"text": match.group(), "start": match.start(), "end": match.end()})
+
+    if "PHONE" in enabled_entities:
+        for match in re.finditer(phone_pattern, text):
+            matches.append({"text": match.group(), "start": match.start(), "end": match.end()})
+
+    if "SSN" in enabled_entities:
+        for match in re.finditer(ssn_pattern, text):
+            matches.append({"text": match.group(), "start": match.start(), "end": match.end()})
+
+    if "CC" in enabled_entities:
+        for match in re.finditer(credit_card_pattern, text):
+            matches.append({"text": match.group(), "start": match.start(), "end": match.end()})
+
+    if "NUMBER" in enabled_entities:
+        for match in re.finditer(number_pattern, text):
+            matches.append({"text": match.group(), "start": match.start(), "end": match.end()})
+
+    return matches
+
+
+def redact_pdf(input_path: str, output_path: str, enabled_entities: List[str]) -> None:
+    doc = fitz.open(input_path)
+
+    for page in doc:
+        blocks = page.get_text("blocks")
+        for b in blocks:
+            text = b[4]
+            matches = get_matches(text, enabled_entities)
+
+            for match in matches:
+                rects = page.search_for(match["text"])
+                for rect in rects:
+                    page.add_redact_annot(rect, fill=(0, 0, 0))
+
+        page.apply_redactions()
+
+    doc.save(output_path)
+    doc.close()
