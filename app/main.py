@@ -3,82 +3,76 @@ import fitz  # PyMuPDF
 import re
 import io
 
+# ---------- CONFIG ---------- #
 st.set_page_config(page_title="PDF Redactor", layout="centered")
 
-st.title("🔒 PDF Redactor")
+# ---------- HELPER FUNCTIONS ---------- #
+def find_matches(text, patterns):
+    matches = []
+    for pattern in patterns:
+        matches.extend(re.finditer(pattern, text, re.IGNORECASE))
+    return matches
 
-uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
+def redact_pdf(pdf_file, patterns):
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    for page in doc:
+        text = page.get_text("text")
+        matches = find_matches(text, patterns)
+        for match in matches:
+            matched_text = match.group()
+            areas = page.search_for(matched_text)
+            for area in areas:
+                page.add_redact_annot(area, fill=(0, 0, 0))
+        page.apply_redactions()
+    output = io.BytesIO()
+    doc.save(output)
+    return output
 
-# Redaction options
-st.sidebar.title("What do you want to redact?")
-select_all = st.sidebar.checkbox("Select All")
-
-redaction_options = {
-    "Names": select_all or st.sidebar.checkbox("Names"),
-    "Social Security Numbers": select_all or st.sidebar.checkbox("Social Security Numbers"),
-    "Email Addresses": select_all or st.sidebar.checkbox("Email Addresses"),
-    "Phone Numbers": select_all or st.sidebar.checkbox("Phone Numbers"),
-    "Credit Card Numbers": select_all or st.sidebar.checkbox("Credit Card Numbers"),
-    "Dates": select_all or st.sidebar.checkbox("Dates"),
-    "Addresses": select_all or st.sidebar.checkbox("Addresses"),
+# ---------- REGEX PATTERNS ---------- #
+regex_patterns = {
+    "Names": r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b",
+    "SSN": r"\b\d{3}-\d{2}-\d{4}\b",
+    "Email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
+    "Phone": r"\b(?:\+?1\s*[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}\b",
+    "Address": r"\d{1,5}\s[\w\s]{2,30}(?:Street|St|Rd|Road|Avenue|Ave|Boulevard|Blvd|Ln|Lane|Drive|Dr)\.?",
+    "Dates": r"\b(?:\d{1,2}[/-])?\d{1,2}[/-]\d{2,4}\b|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4}"
 }
 
-custom_terms = st.text_input("Custom terms (comma-separated):")
+# ---------- UI ---------- #
+st.title("📄 PDF Redactor")
+st.markdown("Upload a PDF and choose which types of information to redact.")
 
-def build_patterns(options, custom_terms):
-    patterns = []
-
-    if options.get("Names"):
-        # Simple example list of names to redact
-        patterns += [r"\bJohn\b", r"\bEmily\b", r"\b[A-Z][a-z]+\s[A-Z][a-z]+\b"]
-
-    if options.get("Social Security Numbers"):
-        patterns.append(r"\b\d{3}-\d{2}-\d{4}\b")
-
-    if options.get("Email Addresses"):
-        patterns.append(r"\b[\w\.-]+@[\w\.-]+\.\w+\b")
-
-    if options.get("Phone Numbers"):
-        patterns.append(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
-
-    if options.get("Credit Card Numbers"):
-        patterns.append(r"\b(?:\d[ -]*?){13,16}\b")
-
-    if options.get("Dates"):
-        patterns.append(r"\b(?:\d{1,2}[-/th|st|nd|rd\s]*)?(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\s]?\d{2,4}\b")
-        patterns.append(r"\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b")
-
-    if options.get("Addresses"):
-        patterns.append(r"\b\d+\s+\w+\s+(Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Lane|Ln|Drive|Dr)\b")
-
-    if custom_terms:
-        terms = [term.strip() for term in custom_terms.split(",") if term.strip()]
-        patterns += [re.escape(term) for term in terms]
-
-    return patterns
+uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
 
 if uploaded_file:
-    pdf_bytes = uploaded_file.read()
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    # Display checkboxes
+    st.subheader("🔎 What do you want to redact?")
+    select_all = st.checkbox("All")
+    selected = {}
+    for key in regex_patterns:
+        selected[key] = st.checkbox(key, value=select_all)
 
-    patterns = build_patterns(redaction_options, custom_terms)
+    selected_patterns = [regex_patterns[k] for k, v in selected.items() if v]
 
-    try:
-        for page in doc:
-            text = page.get_text()
-            for pattern in patterns:
-                for match in re.finditer(pattern, text, re.IGNORECASE):
-                    matched_text = match.group()
-                    areas = page.search_for(matched_text)
-                    for area in areas:
-                        page.add_redact_annot(area, fill=(0, 0, 0))
-            page.apply_redactions()
+    # Redact button
+    if st.button("Redact PDF"):
+        if not selected_patterns:
+            st.warning("Please select at least one type of information to redact.")
+        else:
+            with st.spinner("Redacting... Please wait."):
+                try:
+                    redacted = redact_pdf(uploaded_file, selected_patterns)
+                    st.success("Redaction complete! ✅")
 
-        redacted_pdf = io.BytesIO()
-        doc.save(redacted_pdf)
-        st.success("Redaction complete. Download your redacted file below.")
-        st.download_button("Download Redacted PDF", redacted_pdf.getvalue(), file_name="redacted.pdf")
+                    # Preview PDF
+                    st.subheader("🔍 Preview")
+                    base64_pdf = redacted.getvalue()
+                    st.download_button("📥 Download Redacted PDF", data=base64_pdf, file_name="redacted.pdf")
 
-    except Exception as e:
-        st.error("Something went wrong during redaction.")
-        st.exception(e)
+                    # Show preview in viewer
+                    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf.encode("base64").decode()}" width="700" height="1000" type="application/pdf"></iframe>'
+                    st.markdown(pdf_display, unsafe_allow_html=True)
+
+                except Exception as e:
+                    st.error(f"Something went wrong during redaction.\n\n{e}")
+
