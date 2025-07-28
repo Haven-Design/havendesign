@@ -1,78 +1,85 @@
 import streamlit as st
 import fitz  # PyMuPDF
 import re
-import io
+from io import BytesIO
 
-# ---------- CONFIG ---------- #
-st.set_page_config(page_title="PDF Redactor", layout="centered")
+st.set_page_config(page_title="PDF Redactor", layout="wide")
 
-# ---------- HELPER FUNCTIONS ---------- #
-def find_matches(text, patterns):
-    matches = []
-    for pattern in patterns:
-        matches.extend(re.finditer(pattern, text, re.IGNORECASE))
-    return matches
+st.title("PDF Redactor")
 
-def redact_pdf(pdf_file, patterns):
-    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-    for page in doc:
-        text = page.get_text("text")
-        matches = find_matches(text, patterns)
-        for match in matches:
-            matched_text = match.group()
-            areas = page.search_for(matched_text)
-            for area in areas:
-                page.add_redact_annot(area, fill=(0, 0, 0))
-        page.apply_redactions()
-    output = io.BytesIO()
-    doc.save(output)
-    return output
+uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
 
-# ---------- REGEX PATTERNS ---------- #
-regex_patterns = {
-    "Names": r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b",
-    "SSN": r"\b\d{3}-\d{2}-\d{4}\b",
-    "Email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
-    "Phone": r"\b(?:\+?1\s*[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}\b",
-    "Address": r"\d{1,5}\s[\w\s]{2,30}(?:Street|St|Rd|Road|Avenue|Ave|Boulevard|Blvd|Ln|Lane|Drive|Dr)\.?",
-    "Dates": r"\b(?:\d{1,2}[/-])?\d{1,2}[/-]\d{2,4}\b|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4}"
+# Checkbox options
+st.subheader("Select the types of data to redact:")
+select_all = st.checkbox("Select All")
+
+option_names = {
+    "Names": r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b",
+    "SSNs": r"\b\d{3}-\d{2}-\d{4}\b",
+    "Emails": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+    "Phone Numbers": r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
+    "Dates": r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4})\b",
 }
 
-# ---------- UI ---------- #
-st.title("📄 PDF Redactor")
-st.markdown("Upload a PDF and choose which types of information to redact.")
+# Keep track of selected types
+selected_options = {
+    label: st.checkbox(label, value=select_all)
+    for label in option_names
+}
 
-uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+custom_terms_input = st.text_input("Custom terms to redact (comma separated)")
 
-if uploaded_file:
-    # Display checkboxes
-    st.subheader("🔎 What do you want to redact?")
-    select_all = st.checkbox("All")
-    selected = {}
-    for key in regex_patterns:
-        selected[key] = st.checkbox(key, value=select_all)
+if st.button("Redact PDF") and uploaded_file:
+    try:
+        file_bytes = uploaded_file.read()
+        pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
 
-    selected_patterns = [regex_patterns[k] for k, v in selected.items() if v]
+        # Build redaction pattern list
+        patterns = []
 
-    # Redact button
-    if st.button("Redact PDF"):
-        if not selected_patterns:
-            st.warning("Please select at least one type of information to redact.")
-        else:
-            with st.spinner("Redacting... Please wait."):
-                try:
-                    redacted = redact_pdf(uploaded_file, selected_patterns)
-                    st.success("Redaction complete! ✅")
+        for label, selected in selected_options.items():
+            if selected:
+                patterns.append(option_names[label])
 
-                    # Preview PDF
-                    st.subheader("🔍 Preview")
-                    base64_pdf = redacted.getvalue()
-                    st.download_button("📥 Download Redacted PDF", data=base64_pdf, file_name="redacted.pdf")
+        # Add custom terms
+        if custom_terms_input.strip():
+            custom_terms = [term.strip() for term in custom_terms_input.split(",")]
+            for term in custom_terms:
+                # Escape special characters unless it's a regex
+                if not re.match(r"^[\[\]\\^$.|?*+(){}]", term):
+                    term = re.escape(term)
+                patterns.append(fr"\b{term}\b")
 
-                    # Show preview in viewer
-                    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf.encode("base64").decode()}" width="700" height="1000" type="application/pdf"></iframe>'
-                    st.markdown(pdf_display, unsafe_allow_html=True)
+        combined_pattern = "|".join(patterns)
+        regex = re.compile(combined_pattern, re.IGNORECASE)
 
-                except Exception as e:
-                    st.error(f"Something went wrong during redaction.\n\n{e}")
+        redacted_pdf = fitz.open()
 
+        progress_bar = st.progress(0, text="Redacting...")
+
+        for page_num, page in enumerate(pdf_doc):
+            text_instances = regex.finditer(page.get_text())
+            for match in text_instances:
+                rects = page.search_for(match.group(), quads=True)
+                for rect in rects:
+                    page.add_redact_annot(rect.rect, fill=(0, 0, 0))
+            page.apply_redactions()
+            redacted_pdf.insert_pdf(pdf_doc, from_page=page_num, to_page=page_num)
+            progress_bar.progress((page_num + 1) / len(pdf_doc), text=f"Redacting page {page_num + 1}")
+
+        # Save redacted PDF to memory
+        redacted_bytes = redacted_pdf.write()
+
+        st.success("Redaction complete!")
+
+        # Show preview of the first page
+        st.subheader("Preview:")
+        preview_page = redacted_pdf.load_page(0)
+        pix = preview_page.get_pixmap(matrix=fitz.Matrix(2, 2))
+        st.image(pix.tobytes("png"), use_column_width=True)
+
+        st.download_button("Download Redacted PDF", data=redacted_bytes, file_name="redacted.pdf")
+
+    except Exception as e:
+        st.error("Something went wrong during redaction.")
+        st.exception(e)
