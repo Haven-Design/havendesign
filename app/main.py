@@ -1,59 +1,70 @@
 import streamlit as st
-from utilities.redact_pdf import PDFRedactor
-import fitz  # PyMuPDF
+from PyPDF2 import PdfReader
+from pdf2image import convert_from_bytes
+from io import BytesIO
+from utilities.redact_pdf import redact_pdf
 import base64
-import os
 
-st.set_page_config(layout="wide")
-
+st.set_page_config(page_title="PDF Redactor", layout="wide")
 st.title("🔒 PDF Redactor")
 
-# Sidebar
-st.sidebar.header("Redaction Settings")
+if "pdf_bytes" not in st.session_state:
+    st.session_state["pdf_bytes"] = None
+if "selected_pages" not in st.session_state:
+    st.session_state["selected_pages"] = []
+if "redacted_pdf_bytes" not in st.session_state:
+    st.session_state["redacted_pdf_bytes"] = None
 
-redaction_options = {
-    "Names": False,
-    "Emails": False,
-    "Phone Numbers": False,
-    "Dates": False,
-    "Addresses": False,
-    "Organizations": False,
-    "SSNs": False,
-    "Credit Card Numbers": False,
-}
-
-select_all = st.sidebar.checkbox("Select All")
-
-for key in redaction_options:
-    redaction_options[key] = st.sidebar.checkbox(key, value=select_all)
-
-# File uploader
 uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
 
 if uploaded_file:
-    pdf_bytes = uploaded_file.read()
-    doc = PDFRedactor(pdf_bytes)
-    doc.set_redaction_targets(redaction_options)
+    st.session_state["pdf_bytes"] = uploaded_file.read()
+    reader = PdfReader(BytesIO(st.session_state["pdf_bytes"]))
+    total_pages = len(reader.pages)
 
-    st.subheader("📄 Preview")
-    preview_tabs = st.tabs([f"Page {i+1}" for i in range(doc.page_count())])
+    st.markdown("### Select pages to redact")
+    cols = st.columns([0.1, 0.9])
+    with cols[0]:
+        select_all = st.checkbox("All", key="select_all")
+    with cols[1]:
+        selected = st.multiselect(
+            "", [f"Page {i+1}" for i in range(total_pages)],
+            default=[f"Page {i+1}" for i in range(total_pages)] if st.session_state["selected_pages"] == [] else st.session_state["selected_pages"]
+        )
+    st.session_state["selected_pages"] = selected
 
-    preview_images = doc.get_preview_images()
-    for i, tab in enumerate(preview_tabs):
-        with tab:
-            st.image(preview_images[i], use_column_width=True)
+    # Show preview
+    st.markdown("### PDF Preview")
+    images = convert_from_bytes(st.session_state["pdf_bytes"])
+    for i, image in enumerate(images):
+        if f"Page {i+1}" in st.session_state["selected_pages"]:
+            st.image(image, caption=f"Page {i+1}", use_container_width=True)
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("🔍 Redact PDF"):
-            try:
-                doc.apply_redactions()
-                st.success("Redaction applied successfully.")
-            except Exception as e:
-                st.error(f"Redaction failed: {str(e)}")
+    # Redaction options
+    st.markdown("### Redaction Options")
+    st.session_state["redact_names"] = st.checkbox("Redact Names")
+    st.session_state["redact_addresses"] = st.checkbox("Redact Addresses")
+    st.session_state["redact_dates"] = st.checkbox("Redact Dates")
 
-    with col2:
-        if doc.redacted_pdf:
-            b64 = base64.b64encode(doc.redacted_pdf).decode()
-            href = f'<a href="data:application/pdf;base64,{b64}" download="redacted.pdf">📥 Download Redacted PDF</a>'
-            st.markdown(href, unsafe_allow_html=True)
+    # Perform redaction
+    if st.session_state["redacted_pdf_bytes"] is None:
+        if st.button("Redact PDF"):
+            with st.spinner("Redacting PDF..."):
+                selected_indices = [int(p.split(" ")[1]) - 1 for p in st.session_state["selected_pages"]]
+                st.session_state["redacted_pdf_bytes"] = redact_pdf(
+                    pdf_bytes=st.session_state["pdf_bytes"],
+                    pages_to_redact=selected_indices,
+                    redact_names=st.session_state["redact_names"],
+                    redact_addresses=st.session_state["redact_addresses"],
+                    redact_dates=st.session_state["redact_dates"]
+                )
+                st.success("PDF redacted successfully.")
+
+    # Show download if redaction is done
+    if st.session_state["redacted_pdf_bytes"]:
+        st.download_button(
+            label="Download PDF",
+            data=st.session_state["redacted_pdf_bytes"],
+            file_name="redacted.pdf",
+            mime="application/pdf"
+        )
