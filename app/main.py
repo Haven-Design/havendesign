@@ -1,70 +1,64 @@
-import streamlit as st
-from PyPDF2 import PdfReader
-from pdf2image import convert_from_bytes
-from io import BytesIO
-from utilities.redact_pdf import redact_pdf
-import base64
+import fitz  # PyMuPDF
+import re
+import spacy
+from typing import List
 
-st.set_page_config(page_title="PDF Redactor", layout="wide")
-st.title("🔒 PDF Redactor")
+# Load spaCy model with NER	nlp = spacy.load("en_core_web_sm")
 
-if "pdf_bytes" not in st.session_state:
-    st.session_state["pdf_bytes"] = None
-if "selected_pages" not in st.session_state:
-    st.session_state["selected_pages"] = []
-if "redacted_pdf_bytes" not in st.session_state:
-    st.session_state["redacted_pdf_bytes"] = None
+# Regular expressions for pattern-based detection
+PATTERNS = {
+    "PHONE": re.compile(r"(\+?\d{1,2}[\s-]?)?(\(?\d{3}\)?[\s-]?)?\d{3}[\s-]?\d{4}"),
+    "SSN": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
+    "CREDIT_CARD": re.compile(r"(?:\d[ -]*?){13,16}"),
+    "DATE": re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\w+ \d{1,2}, \d{4})\b")
+}
 
-uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
+# Entity labels to look for from spaCy
+ENTITY_LABELS = {
+    "PERSON": "PERSON",
+    "GPE": "GPE",
+    "DATE": "DATE",
+    "ORG": "ORG",
+    "LOC": "LOC",
+    "ADDRESS": "ADDRESS"
+}
 
-if uploaded_file:
-    st.session_state["pdf_bytes"] = uploaded_file.read()
-    reader = PdfReader(BytesIO(st.session_state["pdf_bytes"]))
-    total_pages = len(reader.pages)
+def find_sensitive_data(text: str, redact_types: List[str]) -> List[str]:
+    sensitive = set()
+    doc = nlp(text)
 
-    st.markdown("### Select pages to redact")
-    cols = st.columns([0.1, 0.9])
-    with cols[0]:
-        select_all = st.checkbox("All", key="select_all")
-    with cols[1]:
-        selected = st.multiselect(
-            "", [f"Page {i+1}" for i in range(total_pages)],
-            default=[f"Page {i+1}" for i in range(total_pages)] if st.session_state["selected_pages"] == [] else st.session_state["selected_pages"]
-        )
-    st.session_state["selected_pages"] = selected
+    # Named Entity Recognition
+    if any(k in redact_types for k in ENTITY_LABELS):
+        for ent in doc.ents:
+            if ent.label_ in redact_types:
+                sensitive.add(ent.text.strip())
 
-    # Show preview
-    st.markdown("### PDF Preview")
-    images = convert_from_bytes(st.session_state["pdf_bytes"])
-    for i, image in enumerate(images):
-        if f"Page {i+1}" in st.session_state["selected_pages"]:
-            st.image(image, caption=f"Page {i+1}", use_container_width=True)
+    # Regex-based matches
+    if "PHONE" in redact_types:
+        sensitive.update(PATTERNS["PHONE"].findall(text))
+    if "SSN" in redact_types:
+        sensitive.update(PATTERNS["SSN"].findall(text))
+    if "CREDIT_CARD" in redact_types:
+        sensitive.update(PATTERNS["CREDIT_CARD"].findall(text))
+    if "DATE" in redact_types:
+        sensitive.update(PATTERNS["DATE"].findall(text))
 
-    # Redaction options
-    st.markdown("### Redaction Options")
-    st.session_state["redact_names"] = st.checkbox("Redact Names")
-    st.session_state["redact_addresses"] = st.checkbox("Redact Addresses")
-    st.session_state["redact_dates"] = st.checkbox("Redact Dates")
+    # Normalize and clean
+    return [s for s in sensitive if s.strip() != ""]
 
-    # Perform redaction
-    if st.session_state["redacted_pdf_bytes"] is None:
-        if st.button("Redact PDF"):
-            with st.spinner("Redacting PDF..."):
-                selected_indices = [int(p.split(" ")[1]) - 1 for p in st.session_state["selected_pages"]]
-                st.session_state["redacted_pdf_bytes"] = redact_pdf(
-                    pdf_bytes=st.session_state["pdf_bytes"],
-                    pages_to_redact=selected_indices,
-                    redact_names=st.session_state["redact_names"],
-                    redact_addresses=st.session_state["redact_addresses"],
-                    redact_dates=st.session_state["redact_dates"]
-                )
-                st.success("PDF redacted successfully.")
+def redact_pdf(input_path: str, output_path: str, redact_types: List[str]) -> None:
+    doc = fitz.open(input_path)
 
-    # Show download if redaction is done
-    if st.session_state["redacted_pdf_bytes"]:
-        st.download_button(
-            label="Download PDF",
-            data=st.session_state["redacted_pdf_bytes"],
-            file_name="redacted.pdf",
-            mime="application/pdf"
-        )
+    for page in doc:
+        text = page.get_text()
+        sensitive_items = find_sensitive_data(text, redact_types)
+
+        for item in sensitive_items:
+            text_instances = page.search_for(item, quads=True)
+            for inst in text_instances:
+                page.add_redact_annot(inst.rect, fill=(0, 0, 0))
+
+        page.apply_redactions()
+
+    doc.save(output_path)
+    doc.close()
