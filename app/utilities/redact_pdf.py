@@ -1,31 +1,29 @@
 import fitz  # PyMuPDF
-import os
 import tempfile
+import os
 
 
-def redact_pdf(input_path, selected_options):
+def redact_pdf(input_path, options):
     doc = fitz.open(input_path)
 
-    # Define your redaction logic here based on selected_options
-    # For example, redact SSNs
-    if "SSN" in selected_options:
-        for page in doc:
-            text_instances = page.search_for(r"\d{3}-\d{2}-\d{4}")
-            for inst in text_instances:
-                page.add_redact_annot(inst, fill=(0, 0, 0))
-    
-    # Add more conditions for other options if needed
-    # if "PHONE" in selected_options:
-    #     ...
+    # Redact keywords on every page
+    for page in doc:
+        for option in options:
+            redactions = page.search_for(option)
+            for rect in redactions:
+                page.add_redact_annot(rect, fill=(0, 0, 0))
+        page.apply_redactions()
 
-    # Apply redactions
-    doc.apply_redactions()
-
-    # Use mkstemp to safely create an output path
+    # Save to a temporary file
     fd, output_path = tempfile.mkstemp(suffix=".pdf")
-    os.close(fd)  # Important: Close the file descriptor so PyMuPDF can write to it
+    os.close(fd)  # Close the file descriptor to avoid 'Permission denied' on Windows
 
-    doc.save(output_path)
-    doc.close()
+    try:
+        doc.save(output_path, deflate=True, clean=True)
+    except Exception as e:
+        print(f"Error saving PDF: {e}")
+        raise
+    finally:
+        doc.close()
 
     return output_path
