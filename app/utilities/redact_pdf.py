@@ -1,31 +1,37 @@
 import fitz  # PyMuPDF
-import tempfile
+import re
 import os
+import tempfile
+from typing import List
 
-def redact_pdf(input_path, options):
+def redact_pdf(input_path: str, selected_redactions: List[str]) -> str:
     doc = fitz.open(input_path)
 
-    redaction_terms = {
-        "names": ["John Doe", "Jane Smith"],
-        "dates": ["01/01/2023", "February 20, 2022"],
-        "phone": ["123-456-7890", "(987) 654-3210"],
-        "email": ["example@email.com", "test.user@example.com"],
+    patterns = {
+        "Names": re.compile(r"(?i)(john doe|jane doe|alice smith|bob jones)"),
+        "Phone Numbers": re.compile(r"(\+?\d{1,2}[\s.-]?)?(\(?\d{3}\)?[\s.-]?)?\d{3}[\s.-]?\d{4}"),
+        "Email Addresses": re.compile(r"[\w\.-]+@[\w\.-]+"),
+        "Dates": re.compile(r"\b(?:\d{1,2}[/-]){2}\d{2,4}\b|\b\d{4}-\d{2}-\d{2}\b"),
+        "Social Security Numbers": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
+        "Credit Card Numbers": re.compile(r"(?:\d[ -]*?){13,16}"),
+        "IP Addresses": re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
     }
 
     for page in doc:
-        found = False  # Track if any redactions were added
-        for option in options:
-            for term in redaction_terms.get(option, []):
-                text_instances = page.search_for(term)
-                for inst in text_instances:
-                    page.add_redact_annot(inst, fill=(0, 0, 0))
-                    found = True
-        if found:
-            page.apply_redactions()  # Apply only if needed
+        text = page.get_text()
+        for redaction_type in selected_redactions:
+            pattern = patterns.get(redaction_type)
+            if not pattern:
+                continue
+            for match in pattern.finditer(text):
+                areas = page.search_for(match.group())
+                for area in areas:
+                    page.add_redact_annot(area, fill=(0, 0, 0))
 
-    # Safely create output file
-    fd, output_path = tempfile.mkstemp(suffix=".pdf")
+    doc.apply_redactions()
+
+    fd, output_path = tempfile.mkstemp(suffix="_redacted.pdf")
     os.close(fd)
-    doc.save(output_path, deflate=True, clean=True)
+    doc.save(output_path)
     doc.close()
     return output_path

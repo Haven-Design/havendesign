@@ -1,50 +1,52 @@
-import os
-import tempfile
 import streamlit as st
+import os
 from utilities.redact_pdf import redact_pdf
-import base64
 
-st.title("PDF Redactor")
+st.set_page_config(page_title="PDF Redactor", layout="centered")
+st.title("📄 PDF Redactor")
 
-uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
+st.markdown("""
+Easily redact sensitive information from PDFs. 
+Select what you'd like to redact and upload your file.
+""")
 
+# Redaction options
 options = [
-    "Emails",
-    "Phone Numbers",
-    "Dates",
     "Names",
-    "SSNs",
-    "Addresses",
-    "Credit Cards"
+    "Phone Numbers",
+    "Email Addresses",
+    "Dates",
+    "Social Security Numbers",
+    "Credit Card Numbers",
+    "IP Addresses"
 ]
 
-selected_options = st.multiselect("Select what to redact", options, default=options)
+selected_options = st.multiselect("What would you like to redact?", options, default=options)
 
-if uploaded_file is not None:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_input:
-        tmp_input.write(uploaded_file.read())
-        tmp_input_path = tmp_input.name
+uploaded_file = st.file_uploader("Upload PDF", type="pdf")
 
-    if st.button("Redact PDF"):
-        with st.spinner("Redacting..."):
-            output_path = redact_pdf(tmp_input_path, selected_options)
+if uploaded_file and selected_options:
+    with st.spinner("Redacting PDF..."):
+        tmp_path = os.path.join("temp_input.pdf")
+        with open(tmp_path, "wb") as f:
+            f.write(uploaded_file.read())
 
-            if output_path and os.path.exists(output_path):
-                # Read redacted file as bytes
-                with open(output_path, "rb") as f:
-                    redacted_bytes = f.read()
+        output_path = redact_pdf(tmp_path, selected_options)
 
-                # Download button
-                st.download_button(
-                    label="Download Redacted PDF",
-                    data=redacted_bytes,
-                    file_name="redacted_output.pdf",
-                    mime="application/pdf"
-                )
+        with open(output_path, "rb") as f:
+            redacted_data = f.read()
 
-                # Inline viewer
-                pdf_base64 = base64.b64encode(redacted_bytes).decode("utf-8")
-                pdf_display = f'<iframe src="data:application/pdf;base64,{pdf_base64}" width="700" height="1000" type="application/pdf"></iframe>'
-                st.markdown(pdf_display, unsafe_allow_html=True)
-            else:
-                st.error("Redaction failed or output file not found.")
+        st.success("✅ Redaction complete!")
+
+        with st.expander("📄 Preview PDF", expanded=False):
+            st.download_button("⬇ Download Redacted PDF", redacted_data, file_name="redacted_output.pdf")
+            st.components.v1.html(f"""
+                <iframe src="data:application/pdf;base64,{redacted_data.encode('base64').decode()}"
+                        width="100%" height="500px" type="application/pdf"></iframe>
+            """, height=500)
+
+        os.remove(tmp_path)
+        os.remove(output_path)
+
+else:
+    st.info("Please upload a PDF and select at least one redaction option.")
