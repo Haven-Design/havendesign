@@ -1,62 +1,50 @@
-import streamlit as st
-import tempfile
 import os
-import base64
+import tempfile
+import streamlit as st
 from utilities.redact_pdf import redact_pdf
-
-st.set_page_config(page_title="PDF Redactor", layout="wide")
+import base64
 
 st.title("PDF Redactor")
 
-uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
-
-st.markdown("### Select what to redact:")
+uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
 
 options = [
-    "Names",
-    "Addresses",
-    "Dates",
+    "Emails",
     "Phone Numbers",
-    "Numbers",
+    "Dates",
+    "Names",
     "SSNs",
-    "Credit Card Numbers",
+    "Addresses",
+    "Credit Cards"
 ]
 
-all_selected = st.checkbox("Select All")
+selected_options = st.multiselect("Select what to redact", options, default=options)
 
-if all_selected:
-    selected_options = options
-else:
-    selected_options = [opt for opt in options if st.checkbox(opt)]
-
-if uploaded_file and selected_options:
+if uploaded_file is not None:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_input:
         tmp_input.write(uploaded_file.read())
         tmp_input_path = tmp_input.name
 
-    with st.spinner("Redacting PDF..."):
-        output_path = redact_pdf(tmp_input_path, selected_options)
+    if st.button("Redact PDF"):
+        with st.spinner("Redacting..."):
+            output_path = redact_pdf(tmp_input_path, selected_options)
 
-    with open(output_path, "rb") as f:
-        st.download_button(
-            label="Download Redacted PDF",
-            data=f,
-            file_name="redacted.pdf",
-            mime="application/pdf"
-        )
+            if output_path and os.path.exists(output_path):
+                # Read redacted file as bytes
+                with open(output_path, "rb") as f:
+                    redacted_bytes = f.read()
 
-    # Render PDF Preview
-    def show_pdf(file_path):
-        with open(file_path, "rb") as f:
-            base64_pdf = base64.b64encode(f.read()).decode("utf-8")
-        pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600px" type="application/pdf"></iframe>'
-        st.components.v1.html(pdf_display, height=620, scrolling=True)
+                # Download button
+                st.download_button(
+                    label="Download Redacted PDF",
+                    data=redacted_bytes,
+                    file_name="redacted_output.pdf",
+                    mime="application/pdf"
+                )
 
-    st.markdown("### Preview:")
-    show_pdf(output_path)
-
-    os.remove(tmp_input_path)
-    os.remove(output_path)
-
-elif uploaded_file and not selected_options:
-    st.info("Please select at least one option to redact.")
+                # Inline viewer
+                pdf_base64 = base64.b64encode(redacted_bytes).decode("utf-8")
+                pdf_display = f'<iframe src="data:application/pdf;base64,{pdf_base64}" width="700" height="1000" type="application/pdf"></iframe>'
+                st.markdown(pdf_display, unsafe_allow_html=True)
+            else:
+                st.error("Redaction failed or output file not found.")
