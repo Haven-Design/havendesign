@@ -1,16 +1,112 @@
-<form method="POST" enctype="multipart/form-data">
-    <input type="file" name="file" required><br><br>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PDF Redactor</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; max-width: 900px; margin: auto; }
+    canvas { border: 1px solid #ccc; max-width: 100%; height: auto; }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+    label { margin-right: 10px; }
+    .checkbox-group { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+    .btn { padding: 10px 15px; background: #0085ca; color: white; border: none; cursor: pointer; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h2>PDF Redactor</h2>
+  <input type="file" id="pdf-upload" accept="application/pdf" />
 
-    <label><input type="checkbox" name="redact_type" value="ALL"> All</label><br>
-    <label><input type="checkbox" name="redact_type" value="NAMES"> Names</label><br>
-    <label><input type="checkbox" name="redact_type" value="EMAILS"> Emails</label><br>
-    <label><input type="checkbox" name="redact_type" value="PHONES"> Phone Numbers</label><br>
-    <label><input type="checkbox" name="redact_type" value="SSN"> Social Security Numbers</label><br>
-    <label><input type="checkbox" name="redact_type" value="DATES"> Dates</label><br>
+  <div class="checkbox-group">
+    <label><input type="checkbox" value="Name" checked> Name</label>
+    <label><input type="checkbox" value="Date"> Date</label>
+    <label><input type="checkbox" value="Email"> Email</label>
+    <label><input type="checkbox" value="Phone"> Phone</label>
+    <label><input type="checkbox" value="Address"> Address</label>
+    <label><input type="checkbox" value="SSN"> SSN</label>
+    <label><input type="checkbox" value="Select All" id="select-all"> Select All</label>
+  </div>
 
-    <br>
-    <label for="custom_inputs">Custom Redaction (comma-separated):</label><br>
-    <input type="text" name="custom_inputs" id="custom_inputs"><br><br>
+  <button class="btn" onclick="sendRedactions()">Redact PDF</button>
+  <br><br>
+  <canvas id="pdf-preview"></canvas>
+  <br><a id="download-link" style="display:none;" download>Download Redacted PDF</a>
 
-    <button type="submit">Redact PDF</button>
-</form>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+  <script>
+    let pdfFile;
+    let redactionAreas = {};  // { pageNum: [{x0, y0, x1, y1}, ...] }
+    let selectedTags = [];
+
+    const canvas = document.getElementById('pdf-preview');
+    const ctx = canvas.getContext('2d');
+
+    document.getElementById('pdf-upload').addEventListener('change', e => {
+      pdfFile = e.target.files[0];
+      renderPDF(pdfFile);
+    });
+
+    function renderPDF(file) {
+      const reader = new FileReader();
+      reader.onload = function() {
+        const typedArray = new Uint8Array(this.result);
+        pdfjsLib.getDocument(typedArray).promise.then(pdf => {
+          pdf.getPage(1).then(page => {
+            const viewport = page.getViewport({scale: 1.5});
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            page.render({canvasContext: ctx, viewport: viewport});
+          });
+        });
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    document.getElementById('select-all').addEventListener('change', function(e) {
+      document.querySelectorAll('.checkbox-group input[type="checkbox"]').forEach(cb => {
+        if (cb.value !== 'Select All') cb.checked = e.target.checked;
+      });
+    });
+
+    function collectSelectedTags() {
+      selectedTags = Array.from(document.querySelectorAll('.checkbox-group input:checked'))
+                          .map(cb => cb.value).filter(v => v !== 'Select All');
+    }
+
+    function sendRedactions() {
+      if (!pdfFile) return alert("Please upload a PDF first.");
+      collectSelectedTags();
+
+      // 🔧 Simulate one redaction box per tag (demo purpose)
+      const exampleAreas = {
+        0: selectedTags.map((tag, i) => ({
+          x0: 50,
+          y0: 50 + (i * 20),
+          x1: 300,
+          y1: 65 + (i * 20)
+        }))
+      };
+
+      const formData = new FormData();
+      formData.append("file", pdfFile);
+      formData.append("data", JSON.stringify(exampleAreas));
+
+      fetch("http://localhost:8000/redact", {
+        method: "POST",
+        body: formData
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.file_url) {
+          const link = document.getElementById('download-link');
+          link.href = `http://localhost:8000${data.file_url}`;
+          link.textContent = "Download Redacted PDF";
+          link.style.display = 'inline-block';
+        } else {
+          alert("Redaction failed: " + JSON.stringify(data));
+        }
+      });
+    }
+  </script>
+</body>
+</html>
