@@ -6,7 +6,7 @@ import uuid
 import shutil
 import json
 
-from app.utilities.redact_pdf import redact_pdf
+from utilities.redact_pdf import redact_pdf
 
 app = FastAPI()
 
