@@ -1,52 +1,50 @@
-import streamlit as st
+from fastapi import FastAPI, UploadFile, Form, File
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 import os
-from utilities.redact_pdf import redact_pdf
+import uuid
+import shutil
+import json
 
-st.set_page_config(page_title="PDF Redactor", layout="centered")
-st.title("📄 PDF Redactor")
+from app.utilities.redact_pdf import redact_pdf
 
-st.markdown("""
-Easily redact sensitive information from PDFs. 
-Select what you'd like to redact and upload your file.
-""")
+app = FastAPI()
 
-# Redaction options
-options = [
-    "Names",
-    "Phone Numbers",
-    "Email Addresses",
-    "Dates",
-    "Social Security Numbers",
-    "Credit Card Numbers",
-    "IP Addresses"
-]
+origins = ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-selected_options = st.multiselect("What would you like to redact?", options, default=options)
+UPLOAD_DIR = "uploaded_files"
+RESULT_DIR = "redacted_files"
 
-uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(RESULT_DIR, exist_ok=True)
 
-if uploaded_file and selected_options:
-    with st.spinner("Redacting PDF..."):
-        tmp_path = os.path.join("temp_input.pdf")
-        with open(tmp_path, "wb") as f:
-            f.write(uploaded_file.read())
+@app.post("/redact")
+async def redact(file: UploadFile = File(...), data: str = Form(...)):
+    try:
+        contents = await file.read()
+        file_id = str(uuid.uuid4())
+        input_path = os.path.join(UPLOAD_DIR, f"{file_id}_{file.filename}")
 
-        output_path = redact_pdf(tmp_path, selected_options)
+        with open(input_path, "wb") as f:
+            f.write(contents)
 
-        with open(output_path, "rb") as f:
-            redacted_data = f.read()
+        areas = json.loads(data)
 
-        st.success("✅ Redaction complete!")
+        output_path = os.path.join(RESULT_DIR, f"redacted_{file.filename}")
+        redact_pdf(input_path, areas, output_path)
 
-        with st.expander("📄 Preview PDF", expanded=False):
-            st.download_button("⬇ Download Redacted PDF", redacted_data, file_name="redacted_output.pdf")
-            st.components.v1.html(f"""
-                <iframe src="data:application/pdf;base64,{redacted_data.encode('base64').decode()}"
-                        width="100%" height="500px" type="application/pdf"></iframe>
-            """, height=500)
+        return JSONResponse(content={"file_url": f"/download/{os.path.basename(output_path)}"})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
-        os.remove(tmp_path)
-        os.remove(output_path)
-
-else:
-    st.info("Please upload a PDF and select at least one redaction option.")
+@app.get("/download/{filename}")
+def download_file(filename: str):
+    file_path = os.path.join(RESULT_DIR, filename)
+    return FileResponse(file_path, media_type='application/pdf', filename=filename)
