@@ -1,5 +1,5 @@
 import streamlit as st
-from utilities.redact_pdf import redact_pdf
+from app.utilities.redact_pdf import redact_pdf
 import os
 import uuid
 from pdf2image import convert_from_path
