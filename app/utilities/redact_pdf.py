@@ -19,7 +19,7 @@ def redact_pdf(input_path, selected_fields, output_path, custom_text=None):
 
         for field in selected_fields:
             for keyword in KEYWORDS.get(field, []):
-                matches = page.search_for(keyword, hit_max=50)
+                matches = page.search_for(keyword)
                 text_instances.extend(matches)
 
         if custom_text:
