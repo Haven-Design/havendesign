@@ -1,14 +1,33 @@
 import fitz  # PyMuPDF
 
-def redact_pdf(input_path, areas, output_path):
+# Demo keyword sets – expand these later with real logic or regex
+KEYWORDS = {
+    "Name": ["John", "Jane", "Doe"],
+    "Email": ["example@", ".com", "email"],
+    "Phone": ["123", "555", "-"],
+    "Address": ["Street", "St.", "Ave", "Road"],
+    "Credit Card": ["4111", "5500", "Visa", "Mastercard"],
+    "SSN": ["123-", "456-", "789-"],
+    "Date": ["2023", "2024", "Jan", "Feb", "Aug"]
+}
+
+def redact_pdf(input_path, selected_fields, output_path, custom_text=None):
     doc = fitz.open(input_path)
 
-    for page_num, page_areas in areas.items():
-        page = doc[int(page_num)]
+    for page in doc:
+        text_instances = []
 
-        for area in page_areas:
-            rect = fitz.Rect(area['x0'], area['y0'], area['x1'], area['y1'])
-            page.add_redact_annot(rect, fill=(0, 0, 0))
+        for field in selected_fields:
+            for keyword in KEYWORDS.get(field, []):
+                matches = page.search_for(keyword, hit_max=50)
+                text_instances.extend(matches)
+
+        if custom_text:
+            matches = page.search_for(custom_text, hit_max=50)
+            text_instances.extend(matches)
+
+        for inst in text_instances:
+            page.add_redact_annot(inst, fill=(0, 0, 0))
 
         page.apply_redactions()
 
