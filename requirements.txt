@@ -1,8 +1,4 @@
-flask
 spacy
 pdfplumber
-reportlab
-pytesseract
-pdf2image
-Pillow
 PyMuPDF
+pdf2image
