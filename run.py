@@ -1,5 +1,14 @@
 import streamlit as st
-from app.utilities import extract_text, redact_text, download_redacted_text
+from app.utilities import extract_text, redact_text
+
+# ✅ ADD THIS FUNCTION
+def download_redacted_text(text: str, filename: str = "redacted_output.txt"):
+    st.download_button(
+        label="Download Redacted Text",
+        data=text,
+        file_name=filename,
+        mime="text/plain"
+    )
 
 st.set_page_config(page_title="Redactor API", layout="centered")
 st.title("Redactor API")
@@ -89,6 +98,7 @@ if uploaded_file:
         st.markdown("### Preview:")
         st.markdown(f"<div class='preview-box'>{redacted}</div>", unsafe_allow_html=True)
 
-        download_btn = download_redacted_text(redacted)
-        st.markdown(download_btn, unsafe_allow_html=True)
+        # ✅ USE THE FUNCTION (no longer assigning to a variable)
+        download_redacted_text(redacted)
+
     st.markdown("</div>", unsafe_allow_html=True)
