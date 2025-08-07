@@ -1,107 +1,67 @@
 import streamlit as st
-from app.utilities.extract_text import extract_text_from_pdf  
-from app.utilities.redact_text import redact_text   
+from app.utilities.extract_text import extract_text_from_pdf
+from app.utilities.redact_pdf import redact_text
 
+st.set_page_config(page_title="PDF Redactor", layout="centered")
 
-def download_redacted_text(text: str, filename: str = "redacted_output.txt"):
-    st.download_button(
-        label="Download Redacted Text",
-        data=text,
-        file_name=filename,
-        mime="text/plain"
-    )
-
-st.set_page_config(page_title="Redactor API", layout="centered")
-st.title("Redactor API")
-
+st.title("PDF Redactor")
 st.markdown("""
-<style>
-    .section {
-        margin-bottom: 3rem;
-    }
-    .file-uploader .css-1p05t8e {
-        display: flex;
-        justify-content: center;
-    }
-    .custom-textarea textarea {
-        min-height: 150px;
-    }
-    .stDownloadButton {
-        margin-top: 20px;
-    }
-    .preview-box {
-        max-width: 700px;
-        margin: 0 auto;
-        padding: 1rem;
-        border: 1px solid #ccc;
-        border-radius: 8px;
+Drag and drop a PDF file below, or click the area to browse your files. Select what types of information you'd like to redact.
+""")
+
+# Upload file section
+uploaded_file = st.file_uploader("Upload PDF", type="pdf", label_visibility="collapsed")
+
+# Hover effect for file upload area
+st.markdown("""
+    <style>
+    .stFileUploader > div:first-child {
+        border: 2px dashed #ccc;
+        padding: 2em;
+        text-align: center;
         background-color: #f9f9f9;
-    }
-    .uploader-wrapper {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        padding: 2rem;
-        border: 2px dashed #aaa;
-        border-radius: 10px;
-        background-color: #f0f0f0;
-        transition: background-color 0.3s;
-    }
-    .uploader-wrapper:hover {
-        background-color: #e0e0e0;
+        transition: background-color 0.3s ease;
         cursor: pointer;
     }
-</style>
+    .stFileUploader > div:first-child:hover {
+        background-color: #e6f7ff;
+    }
+    </style>
 """, unsafe_allow_html=True)
 
-with st.container():
-    st.markdown("<div class='uploader-wrapper'>", unsafe_allow_html=True)
-
-    # ✅ FIXED: Label is now present but hidden properly
-    uploaded_file = st.file_uploader("Upload your file", type=["pdf", "txt"], label_visibility="collapsed")
-
-    st.markdown("""
-    <p><strong>Click or drag a .pdf or .txt file to upload.</strong><br>
-    Redact names, dates, genders, and custom keywords from your file.</p>
-    """, unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
 if uploaded_file:
-    text = extract_text_from_pdf(uploaded_file)
+    pdf_bytes = uploaded_file.read()
+    extracted_text = extract_text_from_pdf(pdf_bytes)
 
-    st.markdown("<div class='section'>", unsafe_allow_html=True)
-    st.subheader("Select what to redact:")
-    col1, col2, col3, col4, col5 = st.columns(5)
+    st.subheader("Select Information to Redact")
+    col1, col2 = st.columns(2)
 
     with col1:
-        redact_names = st.checkbox("Names", value=False)
+        redact_names = st.checkbox("Names")
+        redact_dates = st.checkbox("Dates")
+        redact_emails = st.checkbox("Emails")
     with col2:
-        redact_dates = st.checkbox("Dates", value=False)
-    with col3:
-        redact_genders = st.checkbox("Genders", value=False)
-    with col4:
-        redact_custom = st.checkbox("Custom", value=False)
-    with col5:
-        redact_all = st.checkbox("All", value=False)
+        redact_phone = st.checkbox("Phone Numbers")
+        redact_addresses = st.checkbox("Addresses")
+        redact_all = st.checkbox("Select All")
 
+    # Handle "Select All" behavior
     if redact_all:
-        redact_names = redact_dates = redact_genders = redact_custom = True
+        redact_names = redact_dates = redact_emails = redact_phone = redact_addresses = True
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    selected_options = {
+        "names": redact_names,
+        "dates": redact_dates,
+        "emails": redact_emails,
+        "phones": redact_phone,
+        "addresses": redact_addresses
+    }
 
-    st.markdown("<div class='section'>", unsafe_allow_html=True)
-    custom_words = []
-    if redact_custom:
-        custom_input = st.text_area("Enter custom keywords to redact (comma separated):", key="custom", help="Type one or more keywords separated by commas.")
-        if custom_input:
-            custom_words = [word.strip() for word in custom_input.split(",") if word.strip()]
+    if any(selected_options.values()):
+        redacted_text = redact_text(extracted_text, selected_options)
+        st.subheader("Redacted Text")
+        st.text_area("", redacted_text, height=300)
 
-    if st.button("Redact"):
-        redacted = redact_text(text, redact_names, redact_dates, redact_genders, custom_words)
-
-        st.markdown("### Preview:")
-        st.markdown(f"<div class='preview-box'>{redacted}</div>", unsafe_allow_html=True)
-
-        download_redacted_text(redacted)
-
-    st.markdown("</div>", unsafe_allow_html=True)
+        st.download_button("Download Redacted Text", redacted_text, file_name="redacted_output.txt")
+    else:
+        st.info("Select at least one option to redact.")
