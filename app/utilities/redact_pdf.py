@@ -48,6 +48,16 @@ def get_phrases_to_redact(text, selected_fields, custom_text=None):
     return list(found_phrases)
 
 
+def redact_text(text, selected_fields, custom_text=None):
+    """Redacts sensitive phrases from plain text using the same rules as PDF redaction."""
+    phrases = get_phrases_to_redact(text, selected_fields, custom_text)
+    redacted_text = text
+    for phrase in phrases:
+        # Replace with [REDACTED] preserving phrase length for realism (optional)
+        redacted_text = re.sub(re.escape(phrase), "[REDACTED]", redacted_text, flags=re.IGNORECASE)
+    return redacted_text
+
+
 def redact_pdf(input_path, selected_fields, output_path, custom_text=None):
     doc = fitz.open(input_path)
 
