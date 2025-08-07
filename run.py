@@ -1,8 +1,8 @@
 import streamlit as st
-from app.utilities.extract_text import extract_text  # ✅ FIXED IMPORT
-from app.utilities.redact_text import redact_text    # ✅ FIXED IMPORT
+from app.utilities.extract_text import extract_text_from_pdf  
+from app.utilities.redact_text import redact_text   
 
-# ✅ Add this function here
+
 def download_redacted_text(text: str, filename: str = "redacted_output.txt"):
     st.download_button(
         label="Download Redacted Text",
@@ -67,7 +67,7 @@ with st.container():
     st.markdown("</div>", unsafe_allow_html=True)
 
 if uploaded_file:
-    text = extract_text(uploaded_file)
+    text = extract_text_from_pdf(uploaded_file)
 
     st.markdown("<div class='section'>", unsafe_allow_html=True)
     st.subheader("Select what to redact:")
