@@ -1,5 +1,5 @@
 import streamlit as st
-from utils import extract_text, redact_text, download_redacted_text
+from app.utilities import extract_text, redact_text, download_redacted_text
 
 st.set_page_config(page_title="Redactor API", layout="centered")
 st.title("Redactor API")
