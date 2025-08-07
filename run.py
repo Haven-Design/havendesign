@@ -1,7 +1,8 @@
 import streamlit as st
-from app.utilities import extract_text, redact_text
+from app.utilities.extract_text import extract_text  # ✅ FIXED IMPORT
+from app.utilities.redact_text import redact_text    # ✅ FIXED IMPORT
 
-# ✅ ADD THIS FUNCTION
+# ✅ Add this function here
 def download_redacted_text(text: str, filename: str = "redacted_output.txt"):
     st.download_button(
         label="Download Redacted Text",
@@ -55,7 +56,10 @@ st.markdown("""
 
 with st.container():
     st.markdown("<div class='uploader-wrapper'>", unsafe_allow_html=True)
-    uploaded_file = st.file_uploader("", type=["pdf", "txt"], label_visibility="collapsed")
+
+    # ✅ FIXED: Label is now present but hidden properly
+    uploaded_file = st.file_uploader("Upload your file", type=["pdf", "txt"], label_visibility="collapsed")
+
     st.markdown("""
     <p><strong>Click or drag a .pdf or .txt file to upload.</strong><br>
     Redact names, dates, genders, and custom keywords from your file.</p>
@@ -98,7 +102,6 @@ if uploaded_file:
         st.markdown("### Preview:")
         st.markdown(f"<div class='preview-box'>{redacted}</div>", unsafe_allow_html=True)
 
-        # ✅ USE THE FUNCTION (no longer assigning to a variable)
         download_redacted_text(redacted)
 
     st.markdown("</div>", unsafe_allow_html=True)
