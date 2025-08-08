@@ -1,68 +1,72 @@
-import re
-import spacy
 import fitz  # PyMuPDF
+from io import BytesIO
+import re
 
-# Load NLP model (ensure to run: python -m spacy download en_core_web_sm once)
-nlp = spacy.load("en_core_web_sm")
-
-# Regex patterns for sensitive data
-REGEX_PATTERNS = {
-    "emails": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,6}\b",
-    "phones": r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
-    "dates": r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b",
-    "names": None,  # Will use NLP for names
-    "addresses": None  # Will use NLP for GPE and LOC
+# Example patterns – these can be expanded or adjusted
+PATTERNS = {
+    "names": r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)*)\b",
+    "dates": r"\b\d{1,2}/\d{1,2}/\d{2,4}\b",
+    "emails": r"\b\S+@\S+\.\S+\b",
+    "phones": r"\b(?:\(\d{3}\)\s*|\d{3}[-\s])\d{3}[-\s]\d{4}\b",
+    "addresses": r"\b\d+\s+\w+\s+(Street|St|Avenue|Ave|Road|Rd)\b"
 }
 
-# NLP labels mapped to keys
-NLP_LABELS = {
-    "names": ["PERSON"],
-    "addresses": ["GPE", "LOC"]
-}
+def find_redaction_matches(pdf_bytes, options):
+    """Return detected phrases with coordinates, grouped by page."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    matches_by_page = {}
 
-def redact_text(text, options, return_matches=False):
-    """
-    Redact the text based on options.
-    If return_matches=True, also returns dict of page_num -> list of fitz.Rect for matches.
+    for page_num, page in enumerate(doc):
+        text = page.get_text("text")
+        matches_for_page = []
 
-    options keys: 'names', 'dates', 'emails', 'phones', 'addresses' (all bool)
-    """
-    redacted_text = text
-    matches = {}
+        for category, enabled in options.items():
+            if not enabled:
+                continue
+            pattern = PATTERNS.get(category)
+            if not pattern:
+                continue
 
-    # We'll mock page_num = 0 since plain text extraction doesn't preserve pages
-    page_num = 0
-    matches[page_num] = []
+            for match in re.finditer(pattern, text):
+                phrase = match.group(0)
+                rects = page.search_for(phrase)
+                for rect in rects:
+                    matches_for_page.append({
+                        "phrase": phrase,
+                        "rect": rect
+                    })
 
-    # Collect all matches positions (simulate with spans in text)
-    # Because we don’t have page-based coordinate info here,
-    # For preview, we’ll treat redacted area as full page to draw black boxes.
-    # But for demonstration, let's just return empty rectangles so preview can draw something.
+        if matches_for_page:
+            matches_by_page[page_num] = matches_for_page
 
-    # Redact regex-based patterns
-    for key in ['emails', 'phones', 'dates']:
-        if options.get(key):
-            pattern = REGEX_PATTERNS[key]
-            if pattern:
-                redacted_text = re.sub(pattern, "[REDACTED]", redacted_text, flags=re.IGNORECASE)
+    return matches_by_page
 
-    # Redact NLP entities for names and addresses
-    if options.get("names") or options.get("addresses"):
-        doc = nlp(redacted_text)
-        for ent in reversed(doc.ents):  # reversed to avoid messing up offsets on replacements
-            if options.get("names") and ent.label_ in NLP_LABELS.get("names", []):
-                redacted_text = redacted_text[:ent.start_char] + "[REDACTED]" + redacted_text[ent.end_char:]
-            elif options.get("addresses") and ent.label_ in NLP_LABELS.get("addresses", []):
-                redacted_text = redacted_text[:ent.start_char] + "[REDACTED]" + redacted_text[ent.end_char:]
 
-    # For preview: since we lack real bounding boxes in extracted text,
-    # generate a black box covering the whole page to simulate redaction preview
-    # This is a fallback — ideally you'd get coordinates from PDF text extraction.
-    if return_matches:
-        # Dummy rectangle covering the entire page area (for preview only)
-        # In practice, better to use fitz.Page.rect or similar.
-        matches[page_num].append(fitz.Rect(0, 0, 595, 842))  # A4 page size in points approx
+def apply_redactions(pdf_bytes, matches_by_page, user_choices):
+    """Apply black box redactions only to user-selected phrases."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-        return redacted_text, matches
+    for page_num, matches in matches_by_page.items():
+        selected_phrases = user_choices.get(page_num, [])
+        for match in matches:
+            if match["phrase"] in selected_phrases:
+                page = doc[page_num]
+                page.add_redact_annot(match["rect"], fill=(0, 0, 0))
 
-    return redacted_text
+    # Apply all annotations
+    for page in doc:
+        page.apply_redactions()
+
+    # Create preview images
+    preview_images = []
+    for page in doc:
+        pix = page.get_pixmap(dpi=150)
+        img_bytes = BytesIO(pix.tobytes("png"))
+        preview_images.append(img_bytes)
+
+    # Save final PDF
+    final_pdf = BytesIO()
+    doc.save(final_pdf)
+    final_pdf.seek(0)
+
+    return preview_images, final_pdf
