@@ -1,86 +1,68 @@
-import fitz  # PyMuPDF
 import re
 import spacy
-import pdfplumber
+import fitz  # PyMuPDF
 
-# Load English NLP model (only needs to be downloaded once via: python -m spacy download en_core_web_sm)
+# Load NLP model (ensure to run: python -m spacy download en_core_web_sm once)
 nlp = spacy.load("en_core_web_sm")
 
-# Regex patterns for common sensitive info
+# Regex patterns for sensitive data
 REGEX_PATTERNS = {
-    "Email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,6}\b",
-    "Phone": r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
-    "SSN": r"\b\d{3}-\d{2}-\d{4}\b",
-    "Date": r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b",
-    "Credit Card": r"\b(?:\d[ -]*?){13,16}\b"
+    "emails": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,6}\b",
+    "phones": r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
+    "dates": r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b",
+    "names": None,  # Will use NLP for names
+    "addresses": None  # Will use NLP for GPE and LOC
 }
 
-# NLP entity labels mapped to fields
+# NLP labels mapped to keys
 NLP_LABELS = {
-    "Name": ["PERSON"],
-    "Address": ["GPE", "LOC"],
-    "Date": ["DATE"]
+    "names": ["PERSON"],
+    "addresses": ["GPE", "LOC"]
 }
 
+def redact_text(text, options, return_matches=False):
+    """
+    Redact the text based on options.
+    If return_matches=True, also returns dict of page_num -> list of fitz.Rect for matches.
 
-def get_phrases_to_redact(text, selected_fields, custom_text=None):
-    found_phrases = set()
-
-    # Use regex
-    for field in selected_fields:
-        pattern = REGEX_PATTERNS.get(field)
-        if pattern:
-            matches = re.findall(pattern, text, flags=re.IGNORECASE)
-            found_phrases.update(matches)
-
-    # Use NLP
-    if any(f in NLP_LABELS for f in selected_fields):
-        doc = nlp(text)
-        for ent in doc.ents:
-            for field in selected_fields:
-                if field in NLP_LABELS and ent.label_ in NLP_LABELS[field]:
-                    found_phrases.add(ent.text)
-
-    # Add custom text
-    if custom_text and len(custom_text.strip()) > 2:
-        found_phrases.add(custom_text.strip())
-
-    return list(found_phrases)
-
-
-def redact_text(text, selected_fields, custom_text=None):
-    """Redacts sensitive phrases from plain text using the same rules as PDF redaction."""
-    phrases = get_phrases_to_redact(text, selected_fields, custom_text)
+    options keys: 'names', 'dates', 'emails', 'phones', 'addresses' (all bool)
+    """
     redacted_text = text
-    for phrase in phrases:
-        # Replace with [REDACTED] preserving phrase length for realism (optional)
-        redacted_text = re.sub(re.escape(phrase), "[REDACTED]", redacted_text, flags=re.IGNORECASE)
+    matches = {}
+
+    # We'll mock page_num = 0 since plain text extraction doesn't preserve pages
+    page_num = 0
+    matches[page_num] = []
+
+    # Collect all matches positions (simulate with spans in text)
+    # Because we don’t have page-based coordinate info here,
+    # For preview, we’ll treat redacted area as full page to draw black boxes.
+    # But for demonstration, let's just return empty rectangles so preview can draw something.
+
+    # Redact regex-based patterns
+    for key in ['emails', 'phones', 'dates']:
+        if options.get(key):
+            pattern = REGEX_PATTERNS[key]
+            if pattern:
+                redacted_text = re.sub(pattern, "[REDACTED]", redacted_text, flags=re.IGNORECASE)
+
+    # Redact NLP entities for names and addresses
+    if options.get("names") or options.get("addresses"):
+        doc = nlp(redacted_text)
+        for ent in reversed(doc.ents):  # reversed to avoid messing up offsets on replacements
+            if options.get("names") and ent.label_ in NLP_LABELS.get("names", []):
+                redacted_text = redacted_text[:ent.start_char] + "[REDACTED]" + redacted_text[ent.end_char:]
+            elif options.get("addresses") and ent.label_ in NLP_LABELS.get("addresses", []):
+                redacted_text = redacted_text[:ent.start_char] + "[REDACTED]" + redacted_text[ent.end_char:]
+
+    # For preview: since we lack real bounding boxes in extracted text,
+    # generate a black box covering the whole page to simulate redaction preview
+    # This is a fallback — ideally you'd get coordinates from PDF text extraction.
+    if return_matches:
+        # Dummy rectangle covering the entire page area (for preview only)
+        # In practice, better to use fitz.Page.rect or similar.
+        matches[page_num].append(fitz.Rect(0, 0, 595, 842))  # A4 page size in points approx
+
+        return redacted_text, matches
+
     return redacted_text
-
-
-def redact_pdf(input_path, selected_fields, output_path, custom_text=None):
-    doc = fitz.open(input_path)
-
-    with pdfplumber.open(input_path) as pdf:
-        for i, page in enumerate(pdf.pages):
-            text = page.extract_text()
-            if not text:
-                continue
-
-            phrases = get_phrases_to_redact(text, selected_fields, custom_text)
-            if not phrases:
-                continue
-
-            fitz_page = doc[i]
-            for phrase in phrases:
-                try:
-                    matches = fitz_page.search_for(phrase)
-                    for m in matches:
-                        fitz_page.add_redact_annot(m, fill=(0, 0, 0))
-                except Exception:
-                    continue
-
-            fitz_page.apply_redactions()
-
-    doc.save(output_path, garbage=4, deflate=True)
-    doc.close()

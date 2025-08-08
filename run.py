@@ -8,7 +8,8 @@ st.set_page_config(page_title="PDF Redactor", layout="centered")
 
 st.title("PDF Redactor")
 st.markdown("""
-Drag and drop a PDF file below, or click the area to browse your files. Select what types of information you'd like to redact.
+Drag and drop a PDF file below, or click the area to browse your files.  
+Select what types of information you'd like to redact.
 """)
 
 # Custom CSS for hover effect on file uploader
@@ -35,27 +36,29 @@ uploaded_file = st.file_uploader("Upload PDF", type="pdf", label_visibility="col
 
 
 def generate_pdf_preview_with_boxes(pdf_bytes, options):
-    """Generate a preview of the PDF with black box redactions."""
+    """
+    Generate preview images of the PDF with black box redactions.
+    """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     extracted_text = extract_text_from_pdf(pdf_bytes)
 
-    # Get text matches for redaction
-    matches = redact_text(extracted_text, options, return_matches=True)
+    # Get redacted text and rectangles to redact
+    redacted_text, matches = redact_text(extracted_text, options, return_matches=True)
 
-    # Apply black boxes
+    # Draw black boxes on matches
     for page_num, page in enumerate(doc):
         page_matches = matches.get(page_num, [])
         for rect in page_matches:
             page.draw_rect(rect, color=(0, 0, 0), fill=(0, 0, 0))
 
-    # Convert each page to PNG bytes for preview
+    # Generate PNG images for preview
     preview_images = []
     for page in doc:
         pix = page.get_pixmap(dpi=150)
         img_bytes = BytesIO(pix.tobytes("png"))
         preview_images.append(img_bytes)
 
-    # Save the final redacted PDF
+    # Save final redacted PDF to BytesIO
     final_pdf = BytesIO()
     doc.save(final_pdf)
     final_pdf.seek(0)
