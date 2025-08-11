@@ -1,135 +1,126 @@
 import streamlit as st
-import fitz
-from io import BytesIO
+import base64
+from app.utilities.redact_pdf import redact_pdf, find_redaction_phrases
 
-from utilities.redact_pdf import find_redaction_phrases, redact_pdf
-
-st.set_page_config(page_title="PDF Redactor", layout="wide")
-
-REDACT_OPTIONS = {
+REDACTION_CATEGORIES = {
     "emails": "Emails",
-    "phones": "Phone numbers",
+    "phones": "Phone Numbers",
     "dates": "Dates",
-    "names": "Names",
     "addresses": "Addresses",
+    "names": "Names",
     "zip_codes": "Zip Codes",
-    "credit_cards": "Credit Cards"
+    "credit_cards": "Credit Card Numbers",
 }
 
-def checkbox_select_all(label, options_dict, start_checked=False):
-    """Master 'Select All' and individual checkboxes with default unchecked."""
-    st.markdown(f"### Select categories to redact:")
-    select_all = st.checkbox("Select All", value=start_checked, key="select_all_categories")
-
-    selected = {}
-    for key, val in options_dict.items():
-        if select_all:
-            selected[key] = st.checkbox(val, value=True, key=f"cat_{key}")
-        else:
-            selected[key] = st.checkbox(val, value=start_checked, key=f"cat_{key}")
-    return selected
-
-
 def main():
+    st.set_page_config(page_title="PDF Redactor", layout="wide")
     st.title("PDF Redactor")
 
     if "pdf_bytes" not in st.session_state:
         st.session_state.pdf_bytes = None
     if "highlights" not in st.session_state:
-        st.session_state.highlights = {}
+        st.session_state.highlights = None
     if "excluded_phrases" not in st.session_state:
         st.session_state.excluded_phrases = set()
     if "selected_categories" not in st.session_state:
-        # Start unchecked
-        st.session_state.selected_categories = {key: False for key in REDACT_OPTIONS}
+        st.session_state.selected_categories = []
 
-    uploaded_file = st.file_uploader("Upload PDF file", type=["pdf"])
+    uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
 
-    if uploaded_file is not None:
+    if uploaded_file:
         pdf_bytes = uploaded_file.read()
         st.session_state.pdf_bytes = pdf_bytes
 
-        # Show categories unchecked by default
-        selected_categories = checkbox_select_all("Categories", REDACT_OPTIONS, start_checked=False)
-        st.session_state.selected_categories = selected_categories
+        st.markdown("### Select categories to redact:")
+        all_categories = list(REDACTION_CATEGORIES.keys())
+
+        selected = st.multiselect(
+            "Categories",
+            options=[REDACTION_CATEGORIES[c] for c in all_categories],
+            default=[],
+            key="category_multiselect"
+        )
+
+        selected_keys = [key for key, label in REDACTION_CATEGORIES.items() if label in selected]
+        st.session_state.selected_categories = selected_keys
 
         if st.button("Scan for redacted phrases"):
-            options_to_scan = {k: v for k, v in selected_categories.items() if v}
-            if not options_to_scan:
-                st.warning("Please select at least one category to scan for.")
+            if not selected_keys:
+                st.warning("Please select at least one category to scan.")
             else:
-                highlights = find_redaction_phrases(pdf_bytes, options_to_scan)
+                options = {cat: (cat in selected_keys) for cat in REDACTION_CATEGORIES.keys()}
+                highlights = find_redaction_phrases(pdf_bytes, options)
                 if not highlights:
-                    st.warning("No redaction phrases found for selected categories.")
+                    st.warning("No redaction phrases found.")
+                    st.session_state.highlights = None
+                    st.session_state.excluded_phrases = set()
                 else:
                     st.session_state.highlights = highlights
                     st.session_state.excluded_phrases = set()
-                    # Instead of experimental_rerun, just continue
+                st.experimental_rerun()
 
     if st.session_state.pdf_bytes and st.session_state.highlights:
         highlights = st.session_state.highlights
         excluded = st.session_state.excluded_phrases
 
-        phrases_list = []
-        phrase_keys = []
-        for page_num, matches in highlights.items():
-            for i, match in enumerate(matches):
-                key = f"{page_num}_{i}_{match['text']}"
-                phrases_list.append(match['text'])
-                phrase_keys.append(key)
+        st.markdown("---")
+        st.markdown("### Preview and manage redactions:")
 
         col1, col2 = st.columns([3, 2])
 
         with col1:
-            st.markdown("### PDF Preview with Redactions (hover highlights in red)")
+            st.markdown("**PDF Preview with redactions (hover over highlights):**")
+
             redacted_pdf_bytes = redact_pdf(
                 st.session_state.pdf_bytes,
                 highlights,
                 excluded
             )
 
-            preview_images = []
-            doc = fitz.open(stream=redacted_pdf_bytes, filetype="pdf")
-            for page in doc:
-                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
-                img_bytes = pix.tobytes("png")
-                preview_images.append(img_bytes)
-            doc.close()
-
-            for i, img_bytes in enumerate(preview_images):
-                st.image(img_bytes, caption=f"Page {i + 1}")
+            b64 = base64.b64encode(redacted_pdf_bytes).decode()
+            pdf_display = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="600"></iframe>'
+            st.markdown(pdf_display, unsafe_allow_html=True)
 
         with col2:
-            st.markdown("### Click phrases to exclude from redaction")
+            st.markdown("**Redacted Phrases (click to exclude/include):**")
 
-            container_style = """
-                <style>
-                .scrollbox {
-                    max-height: 400px;
-                    overflow-y: auto;
-                    display: flex;
-                    flex-wrap: wrap;
-                }
-                .phrase {
-                    width: 48%;
-                    margin-bottom: 4px;
-                }
-                </style>
-            """
-            st.markdown(container_style, unsafe_allow_html=True)
+            phrase_keys = []
+            for page_num in highlights:
+                for i, match in enumerate(highlights[page_num]):
+                    phrase = match["text"]
+                    key = f"{page_num}_{i}_{phrase}"
+                    phrase_keys.append(key)
 
-            st.markdown('<div class="scrollbox">', unsafe_allow_html=True)
-            new_excluded = set()
-            for key, phrase in zip(phrase_keys, phrases_list):
-                checked = key in excluded
-                if st.checkbox(phrase, value=checked, key=f"phrase_{key}"):
-                    new_excluded.add(key)
-            st.markdown('</div>', unsafe_allow_html=True)
+            container_height = 500
+            container_style = f"overflow-y: auto; height: {container_height}px; border: 1px solid #ddd; padding: 5px;"
 
-            if new_excluded != excluded:
-                st.session_state.excluded_phrases = new_excluded
-                # No rerun; Streamlit will update automatically
+            st.markdown(f'<div style="{container_style}"><table style="width:100%"><tr>', unsafe_allow_html=True)
+            half = (len(phrase_keys) + 1) // 2
 
+            for col_i in range(2):
+                st.markdown("<td style='vertical-align: top;'>", unsafe_allow_html=True)
+                for idx in range(col_i * half, min(len(phrase_keys), (col_i + 1) * half)):
+                    key = phrase_keys[idx]
+                    included = key not in excluded
+                    label = key.split("_", 2)[2]
+                    checkbox = st.checkbox(
+                        label,
+                        value=included,
+                        key=f"exclude_{key}"
+                    )
+                    if checkbox and key in excluded:
+                        excluded.remove(key)
+                    elif not checkbox and key not in excluded:
+                        excluded.add(key)
+                st.markdown("</td>", unsafe_allow_html=True)
+            st.markdown("</tr></table></div>", unsafe_allow_html=True)
+
+            st.session_state.excluded_phrases = excluded
+
+        st.markdown("---")
+        if st.button("Clear All Selections"):
+            st.session_state.excluded_phrases = set()
+            st.experimental_rerun()
 
 if __name__ == "__main__":
     main()
