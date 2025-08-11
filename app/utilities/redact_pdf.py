@@ -2,6 +2,7 @@ import fitz  # PyMuPDF
 import re
 import spacy
 
+# Load NLP model once
 nlp = spacy.load("en_core_web_sm")
 
 REGEX_PATTERNS = {
@@ -18,31 +19,22 @@ NLP_LABELS = {
 }
 
 def find_redaction_phrases(pdf_bytes, options):
-    """
-    Returns dict:
-    {
-        page_num: [
-            {"text": phrase, "rect": fitz.Rect},
-            ...
-        ],
-        ...
-    }
-    """
+    """Return dict: {page_num: [ {"text": phrase, "rect": fitz.Rect}, ... ], ...}"""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    phrases_by_page = {}
+    matches = {}
 
     for page_num, page in enumerate(doc):
         page_text = page.get_text()
-        page_phrases = []
+        page_matches = []
 
         # Regex matches
         for key, pattern in REGEX_PATTERNS.items():
             if options.get(key):
                 for match in re.finditer(pattern, page_text, flags=re.IGNORECASE):
                     phrase = match.group()
-                    rects = page.search_for(phrase)
-                    for r in rects:
-                        page_phrases.append({"text": phrase, "rect": r})
+                    text_instances = page.search_for(phrase)
+                    for inst in text_instances:
+                        page_matches.append({"text": phrase, "rect": inst})
 
         # NLP matches
         if any(options.get(field) for field in NLP_LABELS):
@@ -51,26 +43,25 @@ def find_redaction_phrases(pdf_bytes, options):
                 for field, labels in NLP_LABELS.items():
                     if options.get(field) and ent.label_ in labels:
                         phrase = ent.text
-                        rects = page.search_for(phrase)
-                        for r in rects:
-                            page_phrases.append({"text": phrase, "rect": r})
+                        text_instances = page.search_for(phrase)
+                        for inst in text_instances:
+                            page_matches.append({"text": phrase, "rect": inst})
 
-        if page_phrases:
-            phrases_by_page[page_num] = page_phrases
+        if page_matches:
+            matches[page_num] = page_matches
 
-    return phrases_by_page
+    return matches
 
-
-def redact_pdf(pdf_bytes, phrases_to_redact):
+def redact_pdf(pdf_bytes, highlights, excluded_phrases):
+    """Create redacted PDF bytes by drawing black rectangles over included highlights."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    for page in doc:
-        page_text = page.get_text()
-        for phrase in phrases_to_redact:
-            text_instances = page.search_for(phrase)
-            for inst in text_instances:
-                # Draw a black rectangle over the phrase for redaction
-                page.add_redact_annot(inst, fill=(0, 0, 0))
-        page.apply_redactions()
-    output_path = "redacted_output.pdf"
-    doc.save(output_path)
-    return output_path
+    for page_num, page in enumerate(doc):
+        for match in highlights.get(page_num, []):
+            phrase = match["text"]
+            if phrase in excluded_phrases:
+                continue
+            rect = match["rect"]
+            # Draw black rectangle over phrase area
+            page.draw_rect(rect, color=(0, 0, 0), fill=(0, 0, 0))
+    out_pdf = doc.write()
+    return out_pdf
