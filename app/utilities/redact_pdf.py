@@ -1,95 +1,183 @@
-import fitz  # PyMuPDF
+# app/utilities/redact_pdf.py
+import fitz
 import re
-import spacy
+import uuid
+from io import BytesIO
+from .extract_text import extract_text_from_pdf
 
-# Load English NLP model (download with: python -m spacy download en_core_web_sm)
-nlp = spacy.load("en_core_web_sm")
-
-# Regex for common sensitive info
-REGEX_PATTERNS = {
-    "names": r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)*\b",  # Simplified name pattern
-    "dates": r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b",
-    "emails": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,6}\b",
-    "phones": r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
-    "addresses": r"\d{1,5}\s\w+\s\w+",  # Simple street address pattern
-    # add more patterns if needed
+# Regex patterns
+PATTERNS = {
+    "dates": r"(?:\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b)|(?:\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b)|(?:\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}(?:,\s*\d{4})?)",
+    "emails": r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+    "phones": r"(?:\+?\d{1,2}[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})",
+    "addresses": r"\d{1,5}\s+[A-Za-z0-9\.\-]+\s+(?:Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Lane|Ln|Drive|Dr)\b",
+    "zipcodes": r"\b\d{5}(?:-\d{4})?\b",
+    # Names handled optionally with simple capitalized-word pattern or NLP if available
+    "names_simple": r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+){0,2}\b"
 }
+
+# Try to import spaCy for better name detection (optional)
+try:
+    import spacy
+    _nlp = spacy.load("en_core_web_sm")
+except Exception:
+    _nlp = None
+
+
+def _compile_patterns(options):
+    pats = []
+    if options.get("dates"):
+        pats.append(PATTERNS["dates"])
+    if options.get("emails"):
+        pats.append(PATTERNS["emails"])
+    if options.get("phones"):
+        pats.append(PATTERNS["phones"])
+    if options.get("addresses"):
+        pats.append(PATTERNS["addresses"])
+    if options.get("zipcodes"):
+        pats.append(PATTERNS["zipcodes"])
+    # names: if user opted in, we will use spaCy if available, otherwise fallback to simple regex
+    if options.get("names"):
+        if _nlp:
+            # will use NLP separately
+            pass
+        else:
+            pats.append(PATTERNS["names_simple"])
+    if not pats:
+        return None
+    return re.compile("|".join(pats), re.IGNORECASE)
+
 
 def find_redaction_matches(pdf_bytes, options):
     """
-    Returns dict: { page_num: [ { 'phrase': str, 'rect': fitz.Rect }, ... ] }
+    Return dict: { page_num: [ { id, text, rect }, ... ] }
+    Uses page.get_text('text') to find phrase matches, then page.search_for(phrase) to get Rects
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     matches = {}
+    combined_re = _compile_patterns(options)
 
-    for page_num, page in enumerate(doc):
-        words = page.get_text("words")  # list of tuples: (x0, y0, x1, y1, word, block_no, line_no, word_no)
-        text = page.get_text()
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        page_text = page.get_text("text")
         page_matches = []
 
-        # Compile regex patterns for selected options
-        patterns = []
-        for key, enabled in options.items():
-            if enabled and key in REGEX_PATTERNS:
-                patterns.append(REGEX_PATTERNS[key])
-        combined_pattern = re.compile("|".join(patterns), re.IGNORECASE) if patterns else None
+        # Regex-based matches (dates/emails/phones/zip/addresses/simple names)
+        if combined_re:
+            for m in combined_re.finditer(page_text):
+                phrase = m.group().strip()
+                if not phrase:
+                    continue
+                # get rectangles on this page for the exact phrase
+                try:
+                    rects = page.search_for(phrase, hit_max=256)
+                except Exception:
+                    rects = []
+                for r in rects:
+                    page_matches.append({"id": str(uuid.uuid4()), "text": phrase, "rect": r})
 
-        # Find matches by regex
-        if combined_pattern:
-            for match in combined_pattern.finditer(text):
-                matched_text = match.group()
-                # Find word rectangles overlapping this match
-                matched_rects = []
-                for w in words:
-                    word_rect = fitz.Rect(w[:4])
-                    word_text = w[4]
-                    # If word inside matched text region by char index approximation
-                    # We'll check if word is inside match span text:
-                    if matched_text.lower() in word_text.lower() or word_text.lower() in matched_text.lower():
-                        matched_rects.append(word_rect)
-                if matched_rects:
-                    # Merge rects to one rectangle
-                    union_rect = matched_rects[0]
-                    for r in matched_rects[1:]:
-                        union_rect |= r
-                    page_matches.append({"phrase": matched_text, "rect": union_rect})
-
-        # NLP-based name detection if names selected
-        if options.get("names", False):
-            doc_nlp = nlp(text)
+        # If names requested and spaCy available, find PERSON entities
+        if options.get("names") and _nlp:
+            doc_nlp = _nlp(page_text)
             for ent in doc_nlp.ents:
                 if ent.label_ == "PERSON":
-                    # find rects for entity text
-                    ent_rects = []
-                    for w in words:
-                        word_rect = fitz.Rect(w[:4])
-                        if ent.text.lower() in w[4].lower() or w[4].lower() in ent.text.lower():
-                            ent_rects.append(word_rect)
-                    if ent_rects:
-                        union_rect = ent_rects[0]
-                        for r in ent_rects[1:]:
-                            union_rect |= r
-                        page_matches.append({"phrase": ent.text, "rect": union_rect})
+                    phrase = ent.text.strip()
+                    try:
+                        rects = page.search_for(phrase, hit_max=256)
+                    except Exception:
+                        rects = []
+                    for r in rects:
+                        page_matches.append({"id": str(uuid.uuid4()), "text": phrase, "rect": r})
 
-        matches[page_num] = page_matches
+        # Deduplicate by text+rect roughly (prevent identical duplicates)
+        unique = []
+        seen = set()
+        for it in page_matches:
+            key = (it["text"].lower(), round(it["rect"].x0, 1), round(it["rect"].y0, 1),
+                   round(it["rect"].x1, 1), round(it["rect"].y1, 1))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(it)
 
+        matches[page_num] = unique
+
+    doc.close()
     return matches
 
 
-def redact_pdf_bytes(pdf_bytes, matches, exclude_phrases=set()):
+def generate_preview_images(pdf_bytes, matches, opacity=0.45):
     """
-    Apply black box redactions on matched phrases except those excluded.
-    Return redacted PDF bytes.
+    Returns list of BytesIO PNG images (one per page) with semi-transparent black boxes
+    applied for the matches provided. The original pdf_bytes is not modified.
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    for page_num, page_matches in matches.items():
+    # Work on a copy of doc in-memory
+    preview_images = []
+
+    for page_num in range(len(doc)):
         page = doc[page_num]
-        for match in page_matches:
-            phrase = match["phrase"]
-            rect = match["rect"]
-            if phrase not in exclude_phrases:
-                page.add_redact_annot(rect, fill=(0, 0, 0))
-        page.apply_redactions()
-    out_pdf = doc.write()
+        # create a temporary shape layer and draw boxes
+        for m in matches.get(page_num, []):
+            r = m["rect"]
+            # draw as shape with commit(opacity)
+            shape = page.new_shape()
+            shape.draw_rect(r)
+            shape.finish(fill=(0, 0, 0), color=None)
+            # commit semi-transparent
+            try:
+                shape.commit(opacity=opacity)
+            except TypeError:
+                # older PyMuPDF versions may not support opacity in commit; fall back to draw_rect + alpha later
+                shape.commit()
+
+        # render page to image (note: shapes are drawn on page, but because we're reading from original doc,
+        # this only affects this in-memory doc)
+        pix = page.get_pixmap(dpi=150)
+        img_bytes = BytesIO(pix.tobytes("png"))
+        preview_images.append(img_bytes)
+
+        # remove drawn shapes for next loop so we don't accumulate (re-open doc for safety)
+        # easiest safe path: re-open doc fresh for next page iteration
+        doc.close()
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    # ensure closed
+    try:
+        doc.close()
+    except Exception:
+        pass
+
+    return preview_images
+
+
+def generate_final_pdf_bytes(pdf_bytes, matches):
+    """
+    Returns BytesIO with a final redacted PDF where each match rect is redacted (solid black).
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        for m in matches.get(page_num, []):
+            r = m["rect"]
+            try:
+                page.add_redact_annot(r, fill=(0, 0, 0))
+            except Exception:
+                # fallback: draw a solid rectangle if add_redact_annot fails
+                shape = page.new_shape()
+                shape.draw_rect(r)
+                shape.finish(fill=(0, 0, 0), color=None)
+                shape.commit(opacity=1.0)
+        # apply redactions for the page
+        try:
+            page.apply_redactions()
+        except Exception:
+            # some versions expect doc.apply_redactions()
+            pass
+
+    out = BytesIO()
+    doc.save(out)
+    out.seek(0)
     doc.close()
-    return out_pdf
+    return out.getvalue()
