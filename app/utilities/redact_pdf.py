@@ -5,13 +5,13 @@ import spacy
 # Load NLP model once
 nlp = spacy.load("en_core_web_sm")
 
-# Regex patterns for sensitive info, add zip codes and credit cards here
+# Regex patterns for sensitive info
 REGEX_PATTERNS = {
     "emails": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,6}\b",
     "phones": r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
     "dates": r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b",
     "addresses": r"\d{1,5}\s\w+(\s\w+){0,5}",  # crude address pattern
-    "zip_codes": r"\b\d{5}(-\d{4})?\b",
+    "zip_codes": r"\b\d{5}(?:-\d{4})?\b",
     "credit_cards": r"\b(?:\d[ -]*?){13,16}\b",
 }
 
@@ -21,11 +21,10 @@ NLP_LABELS = {
     "dates": ["DATE"],
 }
 
-
 def find_redaction_phrases(pdf_bytes, options):
     """
     Return dict: {page_num: [ {"text": phrase, "rect": fitz.Rect}, ... ], ...}
-    options is dict like {'emails': True, 'phones': False, ...}
+    Only include matches for options set True.
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     matches = {}
@@ -39,7 +38,6 @@ def find_redaction_phrases(pdf_bytes, options):
             if options.get(key):
                 for match in re.finditer(pattern, page_text, flags=re.IGNORECASE):
                     phrase = match.group()
-                    # Find rectangles for this phrase on the page
                     text_instances = page.search_for(phrase)
                     for inst in text_instances:
                         page_matches.append({"text": phrase, "rect": inst})
@@ -63,10 +61,9 @@ def find_redaction_phrases(pdf_bytes, options):
 
 def redact_pdf(pdf_bytes, highlights, excluded_keys):
     """
-    Returns bytes of PDF with redactions applied.
-    highlights: dict {page_num: [ {"text": phrase, "rect": fitz.Rect}, ... ], ...}
-    excluded_keys: set of keys of phrases to exclude from redaction
-    Keys format: "pageNum_index_phrase"
+    Return redacted PDF bytes with rectangles drawn for all highlights except excluded keys.
+    Highlights: dict {page_num: [ {"text": phrase, "rect": fitz.Rect}, ... ], ...}
+    Excluded_keys: set of keys like "page_i_index_phrase" to skip redacting those.
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
@@ -75,17 +72,19 @@ def redact_pdf(pdf_bytes, highlights, excluded_keys):
         for i, match in enumerate(matches):
             key = f"{page_num}_{i}_{match['text']}"
             if key in excluded_keys:
-                continue  # Skip this phrase redaction
+                continue
 
-            # Draw transparent grey rectangle with red border on match rect
             rect = match["rect"]
-            highlight_color = (1, 0, 0)  # Red border
-            fill_color = (0.5, 0.5, 0.5, 0.3)  # Transparent grey fill (last value is alpha)
+            highlight_color = (1, 0, 0)  # red border
+            fill_color = (0.5, 0.5, 0.5, 0.3)  # transparent grey fill
 
-            # Draw a filled rectangle with transparency
-            page.add_redact_annot(rect, fill=fill_color, stroke=highlight_color, width=1)
+            page.add_redact_annot(
+                rect,
+                fill=fill_color,
+                border_color=highlight_color,
+                border_width=1,
+            )
 
-        # Apply redactions on page
         page.apply_redactions()
 
     output_bytes = doc.write()
