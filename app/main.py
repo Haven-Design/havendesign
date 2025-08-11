@@ -1,6 +1,6 @@
 import streamlit as st
 import base64
-from app.utilities.redact_pdf import redact_pdf, find_redaction_phrases
+from utilities.redact_pdf import redact_pdf, find_redaction_phrases
 
 REDACTION_CATEGORIES = {
     "emails": "Emails",
