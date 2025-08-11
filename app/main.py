@@ -2,150 +2,170 @@ import streamlit as st
 import fitz  # PyMuPDF
 from io import BytesIO
 import base64
+
 from utilities.extract_text import extract_text_from_pdf
 from utilities.redact_pdf import find_redaction_phrases, redact_pdf
 
-st.set_page_config(page_title="PDF Redactor", layout="wide")
-
-SENSITIVE_CATEGORIES = {
+# Options available for redaction categories and labels
+ALL_OPTIONS = {
     "emails": "Emails",
-    "phones": "Phone numbers",
+    "phones": "Phone Numbers",
     "dates": "Dates",
-    "addresses": "Addresses",
     "names": "Names",
+    "addresses": "Addresses",
     "zip_codes": "Zip Codes",
     "credit_cards": "Credit Card Numbers",
 }
 
-def render_pdf_with_highlights(pdf_bytes, highlights, excluded_phrases):
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    for page_num, page in enumerate(doc):
-        for match in highlights.get(page_num, []):
-            phrase = match["text"]
-            if phrase in excluded_phrases:
-                continue
-            rect = match["rect"]
-            annot = page.add_rect_annot(rect)
-            annot.set_colors(stroke=(1, 1, 0), fill=(0.5, 0.5, 0.5))  # Yellow border, grey fill
-            annot.set_opacity(0.3)
-            annot.update()
-    pdf_stream = BytesIO()
-    doc.save(pdf_stream)
-    pdf_stream.seek(0)
-    return pdf_stream.read()
+# Add regex for zip codes and credit cards in redact_pdf.py accordingly
 
 def main():
+    st.set_page_config(page_title="PDF Redactor", layout="wide")
+
     st.title("PDF Redactor")
 
-    uploaded_file = st.file_uploader("Upload PDF file", type=["pdf"])
-    if uploaded_file is None:
-        st.info("Please upload a PDF file to continue.")
+    # Upload PDF file
+    uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
+    if not uploaded_file:
+        st.info("Please upload a PDF file to get started.")
         return
 
     pdf_bytes = uploaded_file.read()
 
-    st.subheader("Select categories to redact")
+    # Initialize session state for options and highlights
+    if "redact_options" not in st.session_state:
+        st.session_state.redact_options = {key: False for key in ALL_OPTIONS}
+    if "highlights" not in st.session_state:
+        st.session_state.highlights = {}
+    if "excluded_phrases" not in st.session_state:
+        st.session_state.excluded_phrases = set()
+    if "pdf_bytes" not in st.session_state or st.session_state.pdf_bytes != pdf_bytes:
+        st.session_state.pdf_bytes = pdf_bytes
+        st.session_state.highlights = {}
+        st.session_state.excluded_phrases = set()
+        st.session_state.redact_options = {key: False for key in ALL_OPTIONS}
 
-    if "select_all" not in st.session_state:
-        st.session_state.select_all = False
+    st.subheader("Select what to redact")
 
-    def toggle_select_all():
-        st.session_state.select_all = not st.session_state.select_all
+    col_opts1, col_opts2 = st.columns(2)
+    with col_opts1:
+        for key in list(ALL_OPTIONS.keys())[:len(ALL_OPTIONS)//2]:
+            st.session_state.redact_options[key] = st.checkbox(
+                ALL_OPTIONS[key], value=st.session_state.redact_options[key], key=f"opt_{key}"
+            )
+    with col_opts2:
+        for key in list(ALL_OPTIONS.keys())[len(ALL_OPTIONS)//2:]:
+            st.session_state.redact_options[key] = st.checkbox(
+                ALL_OPTIONS[key], value=st.session_state.redact_options[key], key=f"opt_{key}"
+            )
 
-    col_toggle, _ = st.columns([1, 5])
-    with col_toggle:
-        if st.button("Select All" if not st.session_state.select_all else "Deselect All"):
-            toggle_select_all()
+    select_all = st.button("Select All")
+    if select_all:
+        for key in st.session_state.redact_options.keys():
+            st.session_state.redact_options[key] = True
 
-    options = {}
-    for key, label in SENSITIVE_CATEGORIES.items():
-        checked = st.session_state.select_all
-        options[key] = st.checkbox(label, value=checked, key=f"opt_{key}")
+    deselect_all = st.button("Deselect All")
+    if deselect_all:
+        for key in st.session_state.redact_options.keys():
+            st.session_state.redact_options[key] = False
 
     if st.button("Scan for redacted phrases"):
+        options = st.session_state.redact_options
         if not any(options.values()):
             st.warning("Please select at least one category to scan for redaction.")
-            return
+        else:
+            highlights = find_redaction_phrases(pdf_bytes, options)
+            if not highlights:
+                st.warning("No redaction phrases found with selected options.")
+                st.session_state.highlights = {}
+                st.session_state.excluded_phrases = set()
+            else:
+                st.session_state.highlights = highlights
+                st.session_state.excluded_phrases = set()
 
-        highlights = find_redaction_phrases(pdf_bytes, options)
+    if st.session_state.highlights:
+        st.subheader("Redacted Phrases and Preview")
 
-        if not highlights:
-            st.warning("No redaction phrases found with selected options.")
-            return
+        # Flatten phrases with unique keys for checkboxes
+        phrases_to_show = []
+        for page_num, matches in st.session_state.highlights.items():
+            for i, match in enumerate(matches):
+                phrase = match["text"]
+                key = f"{page_num}_{i}_{phrase}"
+                phrases_to_show.append((key, phrase))
 
-        st.session_state.highlights = highlights
-        st.session_state.pdf_bytes = pdf_bytes
-        st.session_state.excluded_phrases = set()
-        st.experimental_rerun()
+        # Layout: Preview on left, phrase list on right
+        preview_col, phrases_col = st.columns([3, 1])
 
-    if "highlights" in st.session_state and "pdf_bytes" in st.session_state:
-        highlights = st.session_state.highlights
-        pdf_bytes = st.session_state.pdf_bytes
-
-        phrase_keys = []
-        phrase_texts = []
-        for page_num, matches in highlights.items():
-            for m in matches:
-                # Unique key based on page, phrase text, and rect coords
-                key = f"{page_num}_{m['text']}_{int(m['rect'].x0)}_{int(m['rect'].y0)}"
-                phrase_keys.append(key)
-                phrase_texts.append(m['text'])
-
-        if "excluded_phrases" not in st.session_state:
-            st.session_state.excluded_phrases = set()
-
-        col1, col2 = st.columns([2, 1])
-
-        with col2:
-            st.subheader("Redacted Phrases (check to EXCLUDE)")
-            st.markdown(
-                """
+        with phrases_col:
+            st.markdown("**Exclude phrases from redaction:**")
+            # Scroll container with two columns
+            scroll_height = 350
+            container = st.container()
+            container.markdown(
+                f"""
                 <style>
-                .scroll-box {
-                    max-height: 400px;
+                .scroll-container {{
+                    height: {scroll_height}px;
                     overflow-y: auto;
-                    border: 1px solid #ddd;
+                    border: 1px solid #ccc;
                     padding: 8px;
-                }
-                .checkbox-grid {
-                    column-count: 2;
-                    column-gap: 20px;
-                }
+                    display: flex;
+                    flex-wrap: wrap;
+                }}
+                .phrase-checkbox {{
+                    width: 48%;
+                    margin-bottom: 6px;
+                }}
                 </style>
                 """,
                 unsafe_allow_html=True,
             )
-            container = st.container()
-            with container:
-                st.markdown('<div class="scroll-box checkbox-grid">', unsafe_allow_html=True)
-                for key, phrase in zip(phrase_keys, phrase_texts):
-                    checked = key in st.session_state.excluded_phrases
-                    exclude = st.checkbox(phrase, value=checked, key=key)
-                    if exclude:
-                        st.session_state.excluded_phrases.add(key)
-                    else:
-                        st.session_state.excluded_phrases.discard(key)
-                st.markdown('</div>', unsafe_allow_html=True)
 
-        excluded_phrases = {k.split("_", 1)[1] for k in st.session_state.excluded_phrases}
+            # Use st.checkbox inside the styled div
+            phrases_html = '<div class="scroll-container">'
+            # Generate unique keys for each checkbox and label
+            for key, phrase_text in phrases_to_show:
+                checked = key not in st.session_state.excluded_phrases
+                # We'll show checkbox with label, but checkbox disables if phrase excluded
+                # Use st.checkbox with key inside phrases_col to keep state
+                pass
+            phrases_html += "</div>"
+            st.markdown(phrases_html, unsafe_allow_html=True)
 
-        with col1:
-            st.subheader("PDF Preview with Highlights")
-            preview_pdf = render_pdf_with_highlights(pdf_bytes, highlights, excluded_phrases)
-            b64 = base64.b64encode(preview_pdf).decode("utf-8")
-            pdf_display = f'<iframe src="data:application/pdf;base64,{b64}" width="700" height="900" style="border:none;"></iframe>'
-            st.markdown(pdf_display, unsafe_allow_html=True)
+            # Because we cannot inject checkboxes directly in custom html,
+            # we will use Streamlit checkboxes with a two-column layout instead:
 
-        if st.button("Download Redacted PDF"):
-            output_pdf = redact_pdf(pdf_bytes, highlights, excluded_phrases)
-            st.success("Redacted PDF ready!")
-            st.download_button(
-                label="Download PDF",
-                data=output_pdf,
-                file_name="redacted_output.pdf",
-                mime="application/pdf",
+            # Let's do this better: Two columns with checkboxes inside phrases_col:
+            phrase_chunks = [phrases_to_show[i : i + (len(phrases_to_show)+1)//2] for i in range(0, len(phrases_to_show), (len(phrases_to_show)+1)//2)]
+            col1, col2 = st.columns(2)
+            for col, chunk in zip([col1, col2], phrase_chunks):
+                with col:
+                    for key, phrase_text in chunk:
+                        checked = key not in st.session_state.excluded_phrases
+                        cb = st.checkbox(phrase_text, value=checked, key=f"exclude_{key}")
+                        if cb:
+                            if key in st.session_state.excluded_phrases:
+                                st.session_state.excluded_phrases.remove(key)
+                        else:
+                            st.session_state.excluded_phrases.add(key)
+
+        with preview_col:
+            st.markdown("**PDF Preview with redactions:**")
+
+            # Generate a redacted PDF preview with current excluded phrases
+            redacted_pdf_bytes = redact_pdf(
+                st.session_state.pdf_bytes,
+                st.session_state.highlights,
+                st.session_state.excluded_phrases,
             )
 
+            # Display PDF preview as embedded base64 PDF (in iframe)
+            b64_pdf = base64.b64encode(redacted_pdf_bytes).decode("utf-8")
+            pdf_display = f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="700" style="border: none;"></iframe>'
+            st.markdown(pdf_display, unsafe_allow_html=True)
+    else:
+        st.info("Select categories and click 'Scan for redacted phrases' to see redactions.")
 
 if __name__ == "__main__":
     main()
