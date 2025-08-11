@@ -1,132 +1,115 @@
 import streamlit as st
-import fitz  # PyMuPDF
+import fitz
 from io import BytesIO
-from utilities.extract_text import extract_text_from_pdf
-from utilities.redact_pdf import find_redaction_matches
+import base64
+from app.utilities.redact_pdf import find_redaction_phrases, redact_pdf
+import os
 
 st.set_page_config(page_title="PDF Redactor", layout="centered")
 
-st.title("PDF Redactor")
-st.markdown("""
-Drag and drop a PDF file below, or click the area to browse your files. Select what types of information you'd like to redact.
-""")
+if "uploaded_pdf" not in st.session_state:
+    st.session_state.uploaded_pdf = None
+if "phrases" not in st.session_state:
+    st.session_state.phrases = {}
+if "redact_selections" not in st.session_state:
+    st.session_state.redact_selections = {}
 
-# CSS hover effect for file uploader area
-st.markdown("""
-    <style>
-    .stFileUploader > div:first-child {
-        border: 2px dashed #ccc;
-        padding: 2em;
-        text-align: center;
-        background-color: #f9f9f9;
-        transition: all 0.3s ease;
-        cursor: pointer;
-        border-radius: 10px;
-    }
-    .stFileUploader > div:first-child:hover {
-        background-color: #e6f7ff;
-        box-shadow: 0 0 20px rgba(0,0,0,0.2);
-        transform: scale(1.01);
-    }
-    </style>
-""", unsafe_allow_html=True)
+st.title("PDF Redaction Tool")
 
-uploaded_file = st.file_uploader("Upload PDF", type="pdf", label_visibility="collapsed")
+uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
 
 if uploaded_file:
     pdf_bytes = uploaded_file.read()
+    st.session_state.uploaded_pdf = pdf_bytes
 
-    st.subheader("Select Information to Redact")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        redact_names = st.checkbox("Names")
-        redact_dates = st.checkbox("Dates")
-        redact_emails = st.checkbox("Emails")
-    with col2:
-        redact_phone = st.checkbox("Phone Numbers")
-        redact_addresses = st.checkbox("Addresses")
-        redact_all = st.checkbox("Select All")
-
-    if redact_all:
-        redact_names = redact_dates = redact_emails = redact_phone = redact_addresses = True
-
-    selected_options = {
-        "names": redact_names,
-        "dates": redact_dates,
-        "emails": redact_emails,
-        "phones": redact_phone,
-        "addresses": redact_addresses
+if st.session_state.uploaded_pdf:
+    # Options for redaction types
+    redact_options = {
+        "emails": st.checkbox("Emails", value=True),
+        "phones": st.checkbox("Phone Numbers", value=True),
+        "dates": st.checkbox("Dates", value=True),
+        "addresses": st.checkbox("Addresses", value=True),
+        "names": st.checkbox("Names", value=True),
     }
 
-    if any(selected_options.values()):
-        matches = find_redaction_matches(pdf_bytes, selected_options)
+    # Find phrases if not found yet or options changed
+    if not st.session_state.phrases or st.button("Refresh Phrases"):
+        st.session_state.phrases = find_redaction_phrases(st.session_state.uploaded_pdf, redact_options)
+        # Reset selections (default all included)
+        st.session_state.redact_selections = {}
+        for page_num, phrases in st.session_state.phrases.items():
+            for i, phrase in enumerate(phrases):
+                key = f"{page_num}_{i}"
+                st.session_state.redact_selections[key] = True  # True means include for redaction
 
-        if matches:
-            st.subheader("Detected Phrases for Redaction (check to exclude)")
+    if st.session_state.phrases:
+        st.subheader("Redaction Phrases")
+        # List phrases with radio buttons Include/Exclude
+        for page_num, phrases in st.session_state.phrases.items():
+            st.markdown(f"### Page {page_num + 1}")
+            for i, phrase in enumerate(phrases):
+                key = f"{page_num}_{i}"
+                selection = st.radio(
+                    label=phrase["text"],
+                    options=["Include", "Exclude"],
+                    index=0 if st.session_state.redact_selections.get(key, True) else 1,
+                    key=key,
+                    horizontal=True,
+                )
+                st.session_state.redact_selections[key] = (selection == "Include")
 
-            if "removed_phrases" not in st.session_state:
-                st.session_state.removed_phrases = set()
+        # Show PDF preview with highlights on included phrases
+        st.subheader("PDF Preview (highlighted phrases to redact)")
 
-            phrases_to_show = []
-            for page_num, phrases in matches.items():
-                for phrase_info in phrases:
-                    phrase_text = phrase_info["text"]
-                    key = f"{page_num}_{phrase_text}"
-                    if key not in st.session_state.removed_phrases:
-                        phrases_to_show.append((key, phrase_text))
-
-            for key, phrase_text in phrases_to_show:
-                exclude = st.checkbox(phrase_text, key=key)
-                if exclude:
-                    st.session_state.removed_phrases.add(key)
-                elif key in st.session_state.removed_phrases:
-                    st.session_state.removed_phrases.remove(key)
-
-            filtered_matches = {}
-            for page_num, phrases in matches.items():
-                filtered = []
-                for phrase_info in phrases:
-                    phrase_text = phrase_info["text"]
-                    key = f"{page_num}_{phrase_text}"
-                    if key not in st.session_state.removed_phrases:
-                        filtered.append(phrase_info)
-                if filtered:
-                    filtered_matches[page_num] = filtered
-
+        def render_highlighted_pdf(pdf_bytes, phrases, selections):
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            for page_num, ph_list in phrases.items():
+                page = doc[page_num]
+                for i, ph in enumerate(ph_list):
+                    key = f"{page_num}_{i}"
+                    if selections.get(key):
+                        rect = ph["rect"]
+                        highlight = page.add_highlight_annot(rect)
+                        highlight.update()
+            output = BytesIO()
+            doc.save(output)
+            doc.close()
+            output.seek(0)
+            return output.read()
 
-            # Draw black rectangles for filtered phrases
-            for page_num, page in enumerate(doc):
-                page_matches = filtered_matches.get(page_num, [])
-                for match in page_matches:
-                    rect = match["rect"]
-                    page.draw_rect(rect, color=(0, 0, 0), fill=(0, 0, 0))
+        preview_pdf = render_highlighted_pdf(st.session_state.uploaded_pdf, st.session_state.phrases, st.session_state.redact_selections)
+        b64 = base64.b64encode(preview_pdf).decode()
+        pdf_display = f'<iframe src="data:application/pdf;base64,{b64}" width="700" height="800" type="application/pdf"></iframe>'
+        st.markdown(pdf_display, unsafe_allow_html=True)
 
-            preview_images = []
-            for page in doc:
-                pix = page.get_pixmap(dpi=150)
-                img_bytes = BytesIO(pix.tobytes("png"))
-                preview_images.append(img_bytes)
+        if st.button("Redact and Download"):
+            # Prepare phrases to redact based on selections
+            phrases_to_redact = {}
+            for page_num, ph_list in st.session_state.phrases.items():
+                filtered = []
+                for i, ph in enumerate(ph_list):
+                    key = f"{page_num}_{i}"
+                    if st.session_state.redact_selections.get(key):
+                        filtered.append(ph)
+                if filtered:
+                    phrases_to_redact[page_num] = filtered
 
-            st.subheader("Preview of Redacted PDF")
-            for img_bytes in preview_images:
-                st.image(img_bytes)
+            # Save uploaded pdf to temp file
+            tmp_path = "temp_input.pdf"
+            with open(tmp_path, "wb") as f:
+                f.write(st.session_state.uploaded_pdf)
 
-            final_pdf = BytesIO()
-            doc.save(final_pdf)
-            final_pdf.seek(0)
+            output_path = redact_pdf(tmp_path, phrases_to_redact)
+            with open(output_path, "rb") as f:
+                redacted_pdf = f.read()
+
+            # Clean up temp files
+            os.remove(tmp_path)
+            os.remove(output_path)
 
             st.download_button(
                 label="Download Redacted PDF",
-                data=final_pdf,
+                data=redacted_pdf,
                 file_name="redacted_output.pdf",
-                mime="application/pdf",
+                mime="application/pdf"
             )
-        else:
-            st.info("No matching phrases found to redact.")
-    else:
-        st.info("Select at least one type of information to redact.")
-else:
-    st.info("Please upload a PDF file.")
