@@ -1,115 +1,149 @@
 import streamlit as st
-import fitz
+import fitz  # PyMuPDF
 from io import BytesIO
 import base64
-from utilities.redact_pdf import find_redaction_phrases, redact_pdf
+from app.utilities.redact_pdf import find_redaction_phrases, redact_pdf
 import os
 
 st.set_page_config(page_title="PDF Redactor", layout="centered")
 
-if "uploaded_pdf" not in st.session_state:
-    st.session_state.uploaded_pdf = None
-if "phrases" not in st.session_state:
-    st.session_state.phrases = {}
-if "redact_selections" not in st.session_state:
-    st.session_state.redact_selections = {}
+def pdf_to_bytes(doc):
+    return doc.write()
 
-st.title("PDF Redaction Tool")
+def render_pdf_with_highlights(pdf_bytes, highlights, phrase_to_highlight=None):
+    """
+    Render PDF bytes with transparent grey highlights and yellow border
+    only for matches of phrase_to_highlight (if given).
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    for page_num, matches in highlights.items():
+        page = doc[page_num]
+        for match in matches:
+            phrase = match["text"]
+            if phrase_to_highlight is not None and phrase != phrase_to_highlight:
+                continue
+            rect = match["rect"]
+            highlight = page.add_highlight_annot(rect)
+            highlight.set_colors(stroke=(1, 1, 0), fill=(0.5, 0.5, 0.5, 0.3))  # yellow border, transparent gray fill
+            highlight.update()
+    return pdf_to_bytes(doc)
 
-uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
+def main():
+    st.title("PDF Redactor")
 
-if uploaded_file:
+    uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+    if uploaded_file is None:
+        st.info("Upload a PDF to begin.")
+        return
+
     pdf_bytes = uploaded_file.read()
-    st.session_state.uploaded_pdf = pdf_bytes
+    highlights = find_redaction_phrases(pdf_bytes)
+    if not highlights:
+        st.warning("No redaction phrases found.")
+        return
 
-if st.session_state.uploaded_pdf:
-    # Options for redaction types
-    redact_options = {
-        "emails": st.checkbox("Emails", value=True),
-        "phones": st.checkbox("Phone Numbers", value=True),
-        "dates": st.checkbox("Dates", value=True),
-        "addresses": st.checkbox("Addresses", value=True),
-        "names": st.checkbox("Names", value=True),
-    }
+    # Extract unique phrases
+    phrase_set = set()
+    for matches in highlights.values():
+        for match in matches:
+            phrase_set.add(match["text"])
+    all_phrases = sorted(list(phrase_set))
 
-    # Find phrases if not found yet or options changed
-    if not st.session_state.phrases or st.button("Refresh Phrases"):
-        st.session_state.phrases = find_redaction_phrases(st.session_state.uploaded_pdf, redact_options)
-        # Reset selections (default all included)
-        st.session_state.redact_selections = {}
-        for page_num, phrases in st.session_state.phrases.items():
-            for i, phrase in enumerate(phrases):
-                key = f"{page_num}_{i}"
-                st.session_state.redact_selections[key] = True  # True means include for redaction
+    if "selected_phrases" not in st.session_state:
+        st.session_state.selected_phrases = set()
 
-    if st.session_state.phrases:
-        st.subheader("Redaction Phrases")
-        # List phrases with radio buttons Include/Exclude
-        for page_num, phrases in st.session_state.phrases.items():
-            st.markdown(f"### Page {page_num + 1}")
-            for i, phrase in enumerate(phrases):
-                key = f"{page_num}_{i}"
-                selection = st.radio(
-                    label=phrase["text"],
-                    options=["Include", "Exclude"],
-                    index=0 if st.session_state.redact_selections.get(key, True) else 1,
-                    key=key,
-                    horizontal=True,
-                )
-                st.session_state.redact_selections[key] = (selection == "Include")
+    if "hovered_phrase" not in st.session_state:
+        st.session_state.hovered_phrase = None
 
-        # Show PDF preview with highlights on included phrases
-        st.subheader("PDF Preview (highlighted phrases to redact)")
+    st.markdown("### Select phrases to redact:")
 
-        def render_highlighted_pdf(pdf_bytes, phrases, selections):
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            for page_num, ph_list in phrases.items():
-                page = doc[page_num]
-                for i, ph in enumerate(ph_list):
-                    key = f"{page_num}_{i}"
-                    if selections.get(key):
-                        rect = ph["rect"]
-                        highlight = page.add_highlight_annot(rect)
-                        highlight.update()
-            output = BytesIO()
-            doc.save(output)
-            doc.close()
-            output.seek(0)
-            return output.read()
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("Select All"):
+            st.session_state.selected_phrases = set(all_phrases)
+    with col2:
+        if st.button("Deselect All"):
+            st.session_state.selected_phrases = set()
 
-        preview_pdf = render_highlighted_pdf(st.session_state.uploaded_pdf, st.session_state.phrases, st.session_state.redact_selections)
-        b64 = base64.b64encode(preview_pdf).decode()
-        pdf_display = f'<iframe src="data:application/pdf;base64,{b64}" width="700" height="800" type="application/pdf"></iframe>'
-        st.markdown(pdf_display, unsafe_allow_html=True)
+    # Scrollable container with 2 columns for phrases + hover detection
+    scroll_style = """
+        <style>
+        div.phrases-scroll {
+            height: 200px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            padding: 8px;
+            background: #f9f9f9;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+        }
+        div.phrase-item {
+            flex: 1 0 45%;  /* roughly 2 columns */
+            cursor: pointer;
+            padding: 4px 6px;
+            border-radius: 4px;
+        }
+        div.phrase-item:hover {
+            background-color: #e0e0e0;
+        }
+        </style>
+    """
+    st.markdown(scroll_style, unsafe_allow_html=True)
 
-        if st.button("Redact and Download"):
-            # Prepare phrases to redact based on selections
-            phrases_to_redact = {}
-            for page_num, ph_list in st.session_state.phrases.items():
-                filtered = []
-                for i, ph in enumerate(ph_list):
-                    key = f"{page_num}_{i}"
-                    if st.session_state.redact_selections.get(key):
-                        filtered.append(ph)
-                if filtered:
-                    phrases_to_redact[page_num] = filtered
+    # We'll build the phrase list as buttons that track hover via click (Streamlit can't detect hover directly)
+    # So user clicks a phrase to highlight it on PDF preview, click again to unhighlight
+    st.markdown('<div class="phrases-scroll">', unsafe_allow_html=True)
 
-            # Save uploaded pdf to temp file
-            tmp_path = "temp_input.pdf"
-            with open(tmp_path, "wb") as f:
-                f.write(st.session_state.uploaded_pdf)
-
-            output_path = redact_pdf(tmp_path, phrases_to_redact)
-            with open(output_path, "rb") as f:
-                redacted_pdf = f.read()
-
-            # Clean up temp files
-            os.remove(tmp_path)
-            os.remove(output_path)
-
-            st.download_button(
-                label="Download Redacted PDF",
-                data=redacted_pdf,
-                file_name="redacted_output.pdf",
-                mime="application/pdf"
+    # We need to show checkboxes for selection and a "highlight on click" for preview
+    for phrase in all_phrases:
+        cols = st.columns([0.1, 1])
+        with cols[0]:
+            checked = st.checkbox("", key=f"chk_{phrase}", value=phrase in st.session_state.selected_phrases)
+            if checked:
+                st.session_state.selected_phrases.add(phrase)
+            else:
+                st.session_state.selected_phrases.discard(phrase)
+        with cols[1]:
+            clicked = st.button(
+                f"👁️ {phrase}" if phrase != st.session_state.hovered_phrase else f"❌ {phrase}",
+                key=f"btn_{phrase}"
             )
+            if clicked:
+                if st.session_state.hovered_phrase == phrase:
+                    st.session_state.hovered_phrase = None
+                else:
+                    st.session_state.hovered_phrase = phrase
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Preview button - regenerates PDF preview with highlight on hovered phrase only
+    if st.button("Preview Redactions"):
+        if not st.session_state.selected_phrases:
+            st.warning("Please select at least one phrase to redact.")
+            return
+        preview_bytes = render_pdf_with_highlights(
+            pdf_bytes,
+            highlights,
+            phrase_to_highlight=st.session_state.hovered_phrase if st.session_state.hovered_phrase else None
+        )
+        b64 = base64.b64encode(preview_bytes).decode()
+        iframe_html = f'<iframe src="data:application/pdf;base64,{b64}" width="700" height="900" type="application/pdf"></iframe>'
+        st.markdown(iframe_html, unsafe_allow_html=True)
+
+    # Download button for fully redacted PDF (all selected phrases redacted)
+    if st.button("Download Redacted PDF"):
+        if not st.session_state.selected_phrases:
+            st.warning("Please select at least one phrase to redact.")
+            return
+        redacted_path = redact_pdf(pdf_bytes, list(st.session_state.selected_phrases))
+        with open(redacted_path, "rb") as f:
+            redacted_bytes = f.read()
+        b64 = base64.b64encode(redacted_bytes).decode()
+        st.markdown(
+            f'<a href="data:application/pdf;base64,{b64}" download="redacted.pdf">Click here to download redacted PDF</a>',
+            unsafe_allow_html=True
+        )
+
+if __name__ == "__main__":
+    main()

@@ -61,27 +61,16 @@ def find_redaction_phrases(pdf_bytes, options):
     return phrases_by_page
 
 
-def redact_pdf(input_path, phrases_to_redact):
-    """
-    input_path: path to input PDF
-    phrases_to_redact: dict of page_num -> list of phrase dicts to redact
-
-    Returns path to redacted PDF file
-    """
-    doc = fitz.open(input_path)
-
-    for page_num, phrases in phrases_to_redact.items():
-        if page_num >= len(doc):
-            continue
-        page = doc[page_num]
-
-        for phrase in phrases:
-            rect = phrase["rect"]
-            # Draw a solid black rectangle over the phrase
-            page.add_redact_annot(rect, fill=(0, 0, 0))
+def redact_pdf(pdf_bytes, phrases_to_redact):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    for page in doc:
+        page_text = page.get_text()
+        for phrase in phrases_to_redact:
+            text_instances = page.search_for(phrase)
+            for inst in text_instances:
+                # Draw a black rectangle over the phrase for redaction
+                page.add_redact_annot(inst, fill=(0, 0, 0))
         page.apply_redactions()
-
-    output_path = input_path.replace(".pdf", "_redacted.pdf")
+    output_path = "redacted_output.pdf"
     doc.save(output_path)
-    doc.close()
     return output_path
