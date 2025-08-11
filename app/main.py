@@ -1,114 +1,104 @@
-# main.py
 import streamlit as st
+import fitz  # PyMuPDF
 from io import BytesIO
 from app.utilities.extract_text import extract_text_from_pdf
-from app.utilities.redact_pdf import (
-    find_redaction_matches,
-    generate_preview_images,
-    generate_final_pdf_bytes,
-)
+from app.utilities.redact_pdf import redact_pdf, find_redaction_matches
 
-st.set_page_config(page_title="PDF Redactor", layout="wide")
+st.set_page_config(page_title="PDF Redactor", layout="centered")
 
-st.title("PDF Redactor — Preview & Selective Redaction")
-st.markdown(
-    """
-Upload a PDF, select categories to scan. Detected matches appear on the right;
-click ❌ to exclude a match and the preview will update instantly.
+st.title("PDF Redactor")
+st.markdown("""
+Drag and drop a PDF file below, or click the area to browse your files. Select what types of information you'd like to redact.
+""")
 
-**Preview uses slightly transparent black boxes.**  
-When you download the final PDF those boxes will be fully opaque (permanent redaction).
-"""
-)
+# Custom CSS for hover effect on file uploader
+st.markdown("""
+    <style>
+    .stFileUploader > div:first-child {
+        border: 2px dashed #ccc;
+        padding: 2em;
+        text-align: center;
+        background-color: #f9f9f9;
+        transition: all 0.3s ease;
+        cursor: pointer;
+        border-radius: 10px;
+    }
+    .stFileUploader > div:first-child:hover {
+        background-color: #e6f7ff;
+        box-shadow: 0 0 20px rgba(0,0,0,0.2);
+        transform: scale(1.01);
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+uploaded_file = st.file_uploader("Upload PDF", type="pdf", label_visibility="collapsed")
 
-if not uploaded_file:
-    st.info("Choose a PDF to get started.")
-    st.stop()
+def generate_pdf_preview_with_boxes(pdf_bytes, selected_options, removed_phrases):
+    """Generate a preview with black boxes for redacted phrases."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    matches = find_redaction_matches(pdf_bytes, selected_options)
 
-pdf_bytes = uploaded_file.read()
+    # Filter out removed phrases from matches
+    for page_num, rects_phrases in matches.items():
+        new_rects = []
+        for rect, phrase in rects_phrases:
+            if phrase not in removed_phrases:
+                new_rects.append((rect, phrase))
+        matches[page_num] = new_rects
 
-# --- Scan options
-st.sidebar.header("Scan categories")
-opt_names = st.sidebar.checkbox("Names (NLP)", value=False)
-opt_dates = st.sidebar.checkbox("Dates", value=True)
-opt_emails = st.sidebar.checkbox("Emails", value=True)
-opt_phones = st.sidebar.checkbox("Phone Numbers", value=True)
-opt_addresses = st.sidebar.checkbox("Addresses", value=False)
-opt_zip = st.sidebar.checkbox("ZIP Codes", value=True)
-opt_all = st.sidebar.checkbox("Select All", value=False)
-if opt_all:
-    opt_names = opt_dates = opt_emails = opt_phones = opt_addresses = opt_zip = True
+    # Draw black boxes on matches
+    for page_num, rects_phrases in matches.items():
+        page = doc[page_num]
+        for rect, _ in rects_phrases:
+            page.draw_rect(rect, color=(0, 0, 0), fill=(0, 0, 0))
 
-options = {
-    "names": opt_names,
-    "dates": opt_dates,
-    "emails": opt_emails,
-    "phones": opt_phones,
-    "addresses": opt_addresses,
-    "zipcodes": opt_zip,
-}
+    # Generate preview images
+    preview_images = []
+    for page in doc:
+        pix = page.get_pixmap(dpi=150)
+        img_bytes = BytesIO(pix.tobytes("png"))
+        preview_images.append(img_bytes)
 
-# --- Find matches (phrase text + fitz.Rects per page)
-with st.spinner("Detecting matches..."):
-    matches = find_redaction_matches(pdf_bytes, options)
+    # Save final redacted PDF bytes
+    output_pdf = BytesIO()
+    doc.save(output_pdf)
+    output_pdf.seek(0)
+    return preview_images, output_pdf, matches
 
-# session state for removed matches
-if "removed_ids" not in st.session_state:
-    st.session_state.removed_ids = set()
 
-def remove_match(id_):
-    st.session_state.removed_ids.add(id_)
+if uploaded_file:
+    pdf_bytes = uploaded_file.read()
 
-# Build filtered matches (exclude removed ids)
-filtered_matches = {}
-for pageno, items in matches.items():
-    filtered = [m for m in items if m["id"] not in st.session_state.removed_ids]
-    if filtered:
-        filtered_matches[pageno] = filtered
+    st.subheader("Select Information to Redact")
+    col1, col2 = st.columns(2)
 
-# Layout: preview (left) + list (right)
-col_preview, col_list = st.columns([2, 1])
+    with col1:
+        redact_names = st.checkbox("Names")
+        redact_dates = st.checkbox("Dates")
+        redact_emails = st.checkbox("Emails")
+    with col2:
+        redact_phone = st.checkbox("Phone Numbers")
+        redact_addresses = st.checkbox("Addresses")
+        redact_all = st.checkbox("Select All")
 
-with col_preview:
-    st.subheader("Preview (transparent redactions)")
-    # Generate preview images (semi-transparent boxes baked into images)
-    preview_images = generate_preview_images(pdf_bytes, filtered_matches, opacity=0.45)
-    for i, img_bytes in enumerate(preview_images):
-        st.image(img_bytes, caption=f"Page {i+1}", use_column_width=True)
+    if redact_all:
+        redact_names = redact_dates = redact_emails = redact_phone = redact_addresses = True
 
-with col_list:
-    st.subheader("Detected matches")
-    st.markdown("Click the ❌ next to any match to exclude it from redaction.")
-    if not any(matches.values()):
-        st.info("No matches detected for the chosen categories.")
-    else:
-        container = st.container()
-        container.markdown("<div style='max-height:560px; overflow:auto;'>", unsafe_allow_html=True)
-        for pageno, items in matches.items():
-            for m in items:
-                # show only if not removed
-                if m["id"] in st.session_state.removed_ids:
-                    continue
-                cols = container.columns([0.8, 0.15, 0.05])
-                # Phrase full text
-                cols[0].markdown(f"**Page {pageno+1}:** {m['text']}")
-                # small context or category not required — kept simple
-                # remove button
-                cols[2].button("❌", key=m["id"], on_click=remove_match, args=(m["id"],))
-        container.markdown("</div>", unsafe_allow_html=True)
+    selected_options = {
+        "names": redact_names,
+        "dates": redact_dates,
+        "emails": redact_emails,
+        "phones": redact_phone,
+        "addresses": redact_addresses,
+    }
 
-# Finalize and download
-st.markdown("---")
-st.markdown("**Final redaction:** when you click the button below we'll produce a PDF with solid black redaction boxes (permanent).")
-if st.button("Generate final redacted PDF"):
-    with st.spinner("Creating final redacted PDF..."):
-        final_pdf_bytes = generate_final_pdf_bytes(pdf_bytes, filtered_matches)
-        st.success("Final redacted PDF ready.")
-        st.download_button(
-            "Download Final Redacted PDF",
-            final_pdf_bytes,
-            file_name="redacted_output.pdf",
-            mime="application/pdf",
+    if any(selected_options.values()):
+        # Session state to track removed phrases
+        if "removed_phrases" not in st.session_state:
+            st.session_state.removed_phrases = set()
+
+        preview_images, final_pdf, matches = generate_pdf_preview_with_boxes(
+            pdf_bytes, selected_options, st.session_state.removed_phrases
         )
+
+        # Show pr
