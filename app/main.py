@@ -1,50 +1,82 @@
-from fastapi import FastAPI, UploadFile, Form, File
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
-import os
-import uuid
-import shutil
-import json
+import streamlit as st
+from io import BytesIO
+import fitz
+from app.utilities.extract_text import extract_text_from_pdf
+from app.utilities.redact_pdf import find_redaction_matches, redact_pdf_bytes
 
-from utilities.redact_pdf import redact_pdf
+st.set_page_config(page_title="PDF Redactor", layout="centered")
+st.title("PDF Redactor - Interactive Redaction Preview")
 
-app = FastAPI()
+uploaded_file = st.file_uploader("Drag and drop a PDF or click to browse", type="pdf", label_visibility="visible")
 
-origins = ["*"]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if uploaded_file:
+    pdf_bytes = uploaded_file.read()
 
-UPLOAD_DIR = "uploaded_files"
-RESULT_DIR = "redacted_files"
+    st.markdown("### Detected Phrases to Redact (select to exclude):")
 
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(RESULT_DIR, exist_ok=True)
+    # Find all redaction matches based on all options selected for demo
+    # You can add UI controls to select categories here if desired
+    options = {"names": True, "dates": True, "emails": True, "phones": True, "addresses": True}
+    matches = find_redaction_matches(pdf_bytes, options)
 
-@app.post("/redact")
-async def redact(file: UploadFile = File(...), data: str = Form(...)):
-    try:
-        contents = await file.read()
-        file_id = str(uuid.uuid4())
-        input_path = os.path.join(UPLOAD_DIR, f"{file_id}_{file.filename}")
+    # Flatten phrases with page number
+    all_phrases = []
+    for pagenum, page_matches in matches.items():
+        for match in page_matches:
+            all_phrases.append((pagenum, match["phrase"]))
 
-        with open(input_path, "wb") as f:
-            f.write(contents)
+    # Use session state to store excluded phrases
+    if "excluded" not in st.session_state:
+        st.session_state.excluded = set()
 
-        areas = json.loads(data)
+    cols = st.columns([0.1, 0.8, 0.1])
+    with cols[0]:
+        st.markdown("Exclude")
+    with cols[1]:
+        st.markdown("Phrase")
+    with cols[2]:
+        st.markdown("Page")
 
-        output_path = os.path.join(RESULT_DIR, f"redacted_{file.filename}")
-        redact_pdf(input_path, areas, output_path)
+    # Display phrases with exclude checkboxes
+    for i, (page_num, phrase) in enumerate(all_phrases):
+        cols = st.columns([0.1, 0.8, 0.1])
+        with cols[0]:
+            checked = phrase in st.session_state.excluded
+            val = st.checkbox("", value=checked, key=f"exclude_{i}")
+            if val and phrase not in st.session_state.excluded:
+                st.session_state.excluded.add(phrase)
+            elif not val and phrase in st.session_state.excluded:
+                st.session_state.excluded.remove(phrase)
+        with cols[1]:
+            st.write(phrase)
+        with cols[2]:
+            st.write(page_num + 1)
 
-        return JSONResponse(content={"file_url": f"/download/{os.path.basename(output_path)}"})
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+    # Show preview with translucent highlights for phrases (excluding excluded ones)
+    st.markdown("### Preview (translucent highlights over phrases)")
 
-@app.get("/download/{filename}")
-def download_file(filename: str):
-    file_path = os.path.join(RESULT_DIR, filename)
-    return FileResponse(file_path, media_type='application/pdf', filename=filename)
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+        img = pix.tobytes("png")
+
+        # Create highlight overlays
+        overlay = page.get_pixmap(alpha=True, matrix=fitz.Matrix(1.5,1.5))
+        for match in matches.get(page_num, []):
+            phrase = match["phrase"]
+            rect = match["rect"]
+            if phrase not in st.session_state.excluded:
+                r = rect * 1.5  # scale rect for preview image
+                # Draw semi-transparent yellow rectangle
+                overlay.draw_rect(r, color=(1, 1, 0), fill=(1, 1, 0, 0.3))
+
+        overlay_bytes = overlay.tobytes("png")
+
+        st.image(img, caption=f"Page {page_num+1}", use_column_width=True)
+        st.image(overlay_bytes, use_column_width=True)
+
+    if st.button("Finalize Redaction and Download PDF"):
+        # Redact PDF bytes excluding excluded phrases
+        redacted_pdf_bytes = redact_pdf_bytes(pdf_bytes, matches, exclude_phrases=st.session_state.excluded)
+        st.download_button("Download Redacted PDF", redacted_pdf_bytes, file_name="redacted_output.pdf", mime="application/pdf")
