@@ -1,148 +1,105 @@
 import streamlit as st
-import base64
-from utilities.redact_pdf import redact_pdf, find_redaction_phrases
+from utilities.redact_pdf import process_pdf, redact_pdf_phrases
+import os
+import tempfile
 
-REDACTION_CATEGORIES = {
-    "emails": "Emails",
-    "phones": "Phone Numbers",
-    "dates": "Dates",
-    "addresses": "Addresses",
-    "names": "Names",
-    "zip_codes": "Zip Codes",
-    "credit_cards": "Credit Card Numbers",
-}
+st.set_page_config(page_title="PDF Redactor", layout="wide")
 
-def main():
-    st.set_page_config(page_title="PDF Redactor", layout="wide")
-    st.title("PDF Redactor")
+# Session state setup
+if "uploaded_file" not in st.session_state:
+    st.session_state.uploaded_file = None
+if "redacted_phrases" not in st.session_state:
+    st.session_state.redacted_phrases = []
+if "selected_phrases" not in st.session_state:
+    st.session_state.selected_phrases = []
+if "processed_pdf" not in st.session_state:
+    st.session_state.processed_pdf = None
 
-    # Initialize session state variables
-    if "pdf_bytes" not in st.session_state:
-        st.session_state.pdf_bytes = None
-    if "highlights" not in st.session_state:
-        st.session_state.highlights = None
-    if "excluded_phrases" not in st.session_state:
-        st.session_state.excluded_phrases = set()
-    if "selected_categories" not in st.session_state:
-        st.session_state.selected_categories = []
-    if "select_all_categories" not in st.session_state:
-        st.session_state.select_all_categories = False
+st.title("PDF Redactor Tool")
 
-    # File upload
-    uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
-    if uploaded_file:
-        pdf_bytes = uploaded_file.read()
-        st.session_state.pdf_bytes = pdf_bytes
+# Step 1: Upload PDF
+uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
+if uploaded_file:
+    st.session_state.uploaded_file = uploaded_file
 
-        st.markdown("### Select categories to redact:")
+# Only continue if file uploaded
+if st.session_state.uploaded_file:
+    # Step 2: Process PDF to detect sensitive info
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_input:
+        tmp_input.write(st.session_state.uploaded_file.read())
+        tmp_input_path = tmp_input.name
 
-        # Select All checkbox
-        def toggle_select_all():
-            if st.session_state.select_all_categories:
-                st.session_state.selected_categories = list(REDACTION_CATEGORIES.keys())
-            else:
-                st.session_state.selected_categories = []
+    detected_phrases = process_pdf(tmp_input_path)
+    st.session_state.redacted_phrases = detected_phrases
 
-        st.checkbox(
-            "Select All",
-            key="select_all_categories",
-            on_change=toggle_select_all
+    # Step 3: Selection UI
+    st.subheader("Select phrases to redact")
+    select_all = st.checkbox("Select All", value=True)
+
+    if select_all:
+        st.session_state.selected_phrases = detected_phrases.copy()
+    else:
+        st.session_state.selected_phrases = []
+
+    # Scrollable phrase list
+    with st.container():
+        st.markdown(
+            """
+            <style>
+            .scroll-box {
+                max-height: 300px;
+                overflow-y: auto;
+                border: 1px solid #ccc;
+                padding: 10px;
+                background-color: transparent;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
         )
 
-        # Category checkboxes
-        for key, label in REDACTION_CATEGORIES.items():
-            checked = key in st.session_state.selected_categories
-            new_val = st.checkbox(label, value=checked, key=f"cat_{key}")
-            if new_val and key not in st.session_state.selected_categories:
-                st.session_state.selected_categories.append(key)
-            elif not new_val and key in st.session_state.selected_categories:
-                st.session_state.selected_categories.remove(key)
-
-        # Sync select_all_categories based on individual selections
-        if len(st.session_state.selected_categories) == len(REDACTION_CATEGORIES):
-            if not st.session_state.select_all_categories:
-                st.session_state.select_all_categories = True
-        else:
-            if st.session_state.select_all_categories:
-                st.session_state.select_all_categories = False
-
-        # Scan button
-        if st.button("Scan for redacted phrases"):
-            if not st.session_state.selected_categories:
-                st.warning("Please select at least one category to scan.")
+        st.markdown('<div class="scroll-box">', unsafe_allow_html=True)
+        for phrase in detected_phrases:
+            checked = select_all or (phrase in st.session_state.selected_phrases)
+            if st.checkbox(phrase, value=checked, key=f"chk_{phrase}"):
+                if phrase not in st.session_state.selected_phrases:
+                    st.session_state.selected_phrases.append(phrase)
             else:
-                options = {cat: (cat in st.session_state.selected_categories) for cat in REDACTION_CATEGORIES.keys()}
-                highlights = find_redaction_phrases(pdf_bytes, options)
-                if not highlights:
-                    st.warning("No redaction phrases found.")
-                    st.session_state.highlights = None
-                    st.session_state.excluded_phrases = set()
-                else:
-                    st.session_state.highlights = highlights
-                    st.session_state.excluded_phrases = set()
-                # No rerun, UI will update next interaction
+                if phrase in st.session_state.selected_phrases:
+                    st.session_state.selected_phrases.remove(phrase)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    # If we have highlights, show preview and phrase list
-    if st.session_state.pdf_bytes and st.session_state.highlights:
-        highlights = st.session_state.highlights
-        excluded = st.session_state.excluded_phrases
+    # Step 4: Redact button
+    if st.button("Apply Redactions"):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_output:
+            redact_pdf_phrases(tmp_input_path, st.session_state.selected_phrases, tmp_output.name)
+            st.session_state.processed_pdf = tmp_output.name
+        st.rerun()
 
-        st.markdown("---")
-        st.markdown("### Preview and manage redactions:")
+# Step 5: Show Preview and Download
+if st.session_state.processed_pdf:
+    col1, col2 = st.columns(2)
 
-        col1, col2 = st.columns([3, 2])
+    with col1:
+        st.subheader("Preview (Redacted)")
+        st.markdown(
+            """
+            <style>
+            .highlight {
+                background-color: rgba(128, 128, 128, 0.4);
+                transition: background-color 0.3s;
+            }
+            .highlight:hover {
+                background-color: yellow;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+        with open(st.session_state.processed_pdf, "rb") as f:
+            st.download_button("Download Redacted PDF", f, file_name="redacted.pdf")
 
-        with col1:
-            st.markdown("**PDF Preview with redactions (hover over highlights):**")
-
-            redacted_pdf_bytes = redact_pdf(
-                st.session_state.pdf_bytes,
-                highlights,
-                excluded
-            )
-
-            b64 = base64.b64encode(redacted_pdf_bytes).decode()
-            pdf_display = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="600"></iframe>'
-            st.markdown(pdf_display, unsafe_allow_html=True)
-
-        with col2:
-            st.markdown("**Redacted Phrases (uncheck to exclude):**")
-
-            phrase_keys = []
-            for page_num in highlights:
-                for i, match in enumerate(highlights[page_num]):
-                    phrase = match["text"]
-                    key = f"{page_num}_{i}_{phrase}"
-                    phrase_keys.append(key)
-
-            container_height = 500
-            container_style = (
-                f"overflow-y: auto; height: {container_height}px; border: 1px solid #ddd; padding: 5px;"
-            )
-
-            # Two column layout inside the container
-            half = (len(phrase_keys) + 1) // 2
-
-            st.markdown(f'<div style="{container_style}"><table style="width:100%"><tr>', unsafe_allow_html=True)
-            for col_i in range(2):
-                st.markdown("<td style='vertical-align: top;'>", unsafe_allow_html=True)
-                for idx in range(col_i * half, min(len(phrase_keys), (col_i + 1) * half)):
-                    key = phrase_keys[idx]
-                    included = key not in excluded
-                    label = key.split("_", 2)[2]
-                    checked = st.checkbox(label, value=included, key=f"phrase_{key}")
-                    if checked and key in excluded:
-                        excluded.remove(key)
-                    elif not checked and key not in excluded:
-                        excluded.add(key)
-                st.markdown("</td>", unsafe_allow_html=True)
-            st.markdown("</tr></table></div>", unsafe_allow_html=True)
-
-            st.session_state.excluded_phrases = excluded
-
-        st.markdown("---")
-        if st.button("Clear All Exclusions"):
-            st.session_state.excluded_phrases = set()
-
-if __name__ == "__main__":
-    main()
+    with col2:
+        st.subheader("Redacted Phrases")
+        for phrase in st.session_state.selected_phrases:
+            st.markdown(f"<span class='highlight'>{phrase}</span>", unsafe_allow_html=True)
