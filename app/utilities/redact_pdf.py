@@ -1,6 +1,7 @@
 import fitz  # PyMuPDF
 import re
 import spacy
+from io import BytesIO
 
 # Load NLP model once
 nlp = spacy.load("en_core_web_sm")
@@ -11,7 +12,7 @@ REGEX_PATTERNS = {
     "phones": r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
     "dates": r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b",
     "addresses": r"\d{1,5}\s\w+(\s\w+){0,5}",  # crude address pattern
-    "zip_codes": r"\b\d{5}(?:-\d{4})?\b",
+    "zipcodes": r"\b\d{5}(?:-\d{4})?\b",
     "credit_cards": r"\b(?:\d[ -]*?){13,16}\b",
 }
 
@@ -24,7 +25,7 @@ NLP_LABELS = {
 def find_redaction_phrases(pdf_bytes, options):
     """
     Return dict: {page_num: [ {"text": phrase, "rect": fitz.Rect}, ... ], ...}
-    Only include matches for options set True.
+    options: dict with keys like 'emails', 'phones', 'dates', 'names', 'addresses', 'zipcodes', 'credit_cards'
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     matches = {}
@@ -59,34 +60,39 @@ def find_redaction_phrases(pdf_bytes, options):
     return matches
 
 
-def redact_pdf(pdf_bytes, highlights, excluded_keys):
+def redact_pdf(pdf_bytes, highlights, excluded_phrases):
     """
-    Return redacted PDF bytes with rectangles drawn for all highlights except excluded keys.
-    Highlights: dict {page_num: [ {"text": phrase, "rect": fitz.Rect}, ... ], ...}
-    Excluded_keys: set of keys like "page_i_index_phrase" to skip redacting those.
+    pdf_bytes: original PDF bytes
+    highlights: dict of {page_num: list of {"text": phrase, "rect": fitz.Rect}}
+    excluded_phrases: set of phrase keys to exclude from redaction
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    for page_num, matches in highlights.items():
-        page = doc[page_num]
-        for i, match in enumerate(matches):
-            key = f"{page_num}_{i}_{match['text']}"
-            if key in excluded_keys:
-                continue
+    for page_num, page in enumerate(doc):
+        if page_num not in highlights:
+            continue
 
+        for i, match in enumerate(highlights[page_num]):
+            phrase = match["text"]
             rect = match["rect"]
-            highlight_color = (1, 0, 0)  # red border
-            fill_color = (0.5, 0.5, 0.5, 0.3)  # transparent grey fill
+            key = f"{page_num}_{i}_{phrase}"
 
+            if key in excluded_phrases:
+                continue  # skip redacting excluded phrases
+
+            highlight_color = (1, 0, 0)  # red border color (RGB)
+            fill_color = (0.5, 0.5, 0.5, 0.3)  # transparent grey fill (RGBA)
+
+            # Add redact annotation with transparent fill and red border on hover
             page.add_redact_annot(
                 rect,
                 fill=fill_color,
-                border_color=highlight_color,
-                border_width=1,
+                stroke=highlight_color,
             )
 
         page.apply_redactions()
 
-    output_bytes = doc.write()
+    output_buffer = BytesIO()
+    doc.save(output_buffer)
     doc.close()
-    return output_bytes
+    return output_buffer.getvalue()
