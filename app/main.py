@@ -1,8 +1,8 @@
 import streamlit as st
 import fitz  # PyMuPDF
 from io import BytesIO
-from app.utilities.extract_text import extract_text_from_pdf
-from app.utilities.redact_pdf import redact_pdf, find_redaction_matches
+from utilities.extract_text import extract_text_from_pdf
+from utilities.redact_pdf import redact_pdf, find_redaction_matches
 
 st.set_page_config(page_title="PDF Redactor", layout="centered")
 
