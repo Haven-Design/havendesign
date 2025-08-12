@@ -11,7 +11,7 @@ import streamlit as st
 # Configure Tesseract path (bundled)
 # ---------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TESSERACT_PATH = os.path.join(BASE_DIR, "Tesseract-OCR", "tesseract.exe")
+TESSERACT_PATH = os.path.join(os.path.dirname(BASE_DIR), "Tesseract-OCR", "tesseract.exe")
 pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
 
 # ---------------------------
