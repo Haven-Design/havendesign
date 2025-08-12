@@ -12,7 +12,7 @@ import streamlit as st
 # ---------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TESSERACT_PATH = os.path.join(os.path.dirname(BASE_DIR), "Tesseract-OCR", "tesseract.exe")
-pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+pytesseract.pytesseract.tesseract_cmd = r"C:\Users\CrKegley\OneDrive - Jenzabar, Inc\Documents\Z-Personal Projects\Redactor-API\Tesseract-OCR\tesseract.exe"
 
 # ---------------------------
 # Streamlit UI
