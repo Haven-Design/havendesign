@@ -41,4 +41,4 @@ for line in lines:
         c.setFont("Helvetica", 12)
         y = h - 50
 c.save()
-print(f"Saved example PDF to {output.resolve()}")
+print(f"Saved {output.resolve()}")
