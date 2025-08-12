@@ -2,7 +2,7 @@ import streamlit as st
 import base64
 import io
 import fitz  # PyMuPDF
-from app.utilities.redact_pdf import (
+from utilities.redact_pdf import (
     find_redaction_phrases,
     redact_pdf_bytes,
 )
