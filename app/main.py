@@ -1,89 +1,49 @@
-import os
-import tempfile
-import shutil
 import pytesseract
-from pytesseract import Output
-from pdf2image import convert_from_path
-from PIL import Image, ImageDraw
-import streamlit as st
+from PIL import Image
+import os
+import subprocess
 
-# ---------------------------
-# Configure Tesseract path (bundled)
-# ---------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TESSERACT_PATH = os.path.join(os.path.dirname(BASE_DIR), "Tesseract-OCR", "tesseract.exe")
+# --- CONFIGURE PATHS HERE ---
+# Path to Tesseract executable
 pytesseract.pytesseract.tesseract_cmd = r"C:\Users\CrKegley\OneDrive - Jenzabar, Inc\Documents\Z-Personal Projects\Redactor-API\Tesseract-OCR\tesseract.exe"
 
-# ---------------------------
-# Streamlit UI
-# ---------------------------
-st.set_page_config(page_title="PDF Redactor with OCR", layout="wide")
-st.title("📄 PDF Redactor with OCR + Color Bounding Boxes")
+# Path to ImageMagick executable
+MAGICK_PATH = r"C:\Users\CrKegley\OneDrive - Jenzabar, Inc\Documents\Z-Personal Projects\Redactor-API\ImageMagick-7.1.2-Q16-HDRI\magick.exe"
 
-st.write("Upload a PDF, search for sensitive text, and preview redactions with color-coded boxes.")
+def convert_pdf_to_images(pdf_path, output_folder):
+    """Convert a PDF into individual image files using ImageMagick."""
+    os.makedirs(output_folder, exist_ok=True)
+    output_pattern = os.path.join(output_folder, "page-%d.png")
+    cmd = [
+        MAGICK_PATH,
+        "convert",
+        "-density", "300",
+        pdf_path,
+        "-quality", "100",
+        output_pattern
+    ]
+    subprocess.run(cmd, check=True)
 
-# Search terms input
-search_terms = st.text_area(
-    "Enter sensitive words or phrases to redact (one per line):",
-    height=150
-).splitlines()
-search_terms = [t.strip() for t in search_terms if t.strip()]
+def ocr_image(image_path):
+    """Run OCR on an image and return the extracted text."""
+    text = pytesseract.image_to_string(Image.open(image_path))
+    return text
 
-uploaded_pdf = st.file_uploader("Upload PDF", type=["pdf"])
+def process_pdf(pdf_path):
+    """Convert PDF to images and run OCR on each."""
+    images_folder = "temp_images"
+    convert_pdf_to_images(pdf_path, images_folder)
 
-if uploaded_pdf and search_terms:
-    # Create temp dir
-    temp_dir = tempfile.mkdtemp()
-    pdf_path = os.path.join(temp_dir, uploaded_pdf.name)
-    with open(pdf_path, "wb") as f:
-        f.write(uploaded_pdf.read())
+    all_text = ""
+    for filename in sorted(os.listdir(images_folder)):
+        if filename.lower().endswith(".png"):
+            image_path = os.path.join(images_folder, filename)
+            text = ocr_image(image_path)
+            all_text += f"\n--- {filename} ---\n{text}"
 
-    # Convert PDF to images
-    st.info("Converting PDF pages to images...")
-    images = convert_from_path(pdf_path)
+    return all_text
 
-    processed_images = []
-    colors = ["red", "blue", "green", "orange", "purple", "cyan"]
-
-    for page_num, img in enumerate(images, start=1):
-        st.write(f"**Processing page {page_num}...**")
-
-        # OCR with bounding box data
-        ocr_data = pytesseract.image_to_data(img, output_type=Output.DICT)
-
-        draw = ImageDraw.Draw(img)
-
-        for i, word in enumerate(ocr_data["text"]):
-            if word.strip() != "":
-                for idx, term in enumerate(search_terms):
-                    if term.lower() in word.lower():
-                        color = colors[idx % len(colors)]
-                        (x, y, w, h) = (
-                            ocr_data["left"][i],
-                            ocr_data["top"][i],
-                            ocr_data["width"][i],
-                            ocr_data["height"][i]
-                        )
-                        draw.rectangle([x, y, x + w, y + h], outline=color, width=3)
-
-        processed_images.append(img)
-
-        st.image(img, caption=f"Page {page_num} preview", use_container_width=True)
-
-    # Download redacted PDF
-    output_pdf_path = os.path.join(temp_dir, "redacted_output.pdf")
-    processed_images[0].save(
-        output_pdf_path, save_all=True, append_images=processed_images[1:]
-    )
-
-    with open(output_pdf_path, "rb") as f:
-        st.download_button(
-            label="⬇️ Download Redacted PDF",
-            data=f,
-            file_name="redacted_output.pdf",
-            mime="application/pdf"
-        )
-
-    # Cleanup temp dir after session
-    if os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir)
+if __name__ == "__main__":
+    pdf_file = "sample.pdf"  # Change to your PDF file path
+    extracted_text = process_pdf(pdf_file)
+    print(extracted_text)
