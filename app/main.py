@@ -7,14 +7,14 @@ from typing import Dict, List
 import streamlit as st
 import streamlit.components.v1 as components
 
-from app.utilities.extract_text import (
+from utilities.extract_text import (
     CATEGORY_PATTERNS,
     CATEGORY_PRIORITY,
     CATEGORY_COLORS_HEX,
     CATEGORY_COLORS_RGB,
     extract_text_and_positions,           # returns list[dict]: {id, page, text, rect, category}
 )
-from app.utilities.redact_pdf import (
+from utilities.redact_pdf import (
     build_preview_pdf,                    # colored rectangles (non-destructive)
     redact_pdf_with_positions,            # true redaction (black boxes)
 )
