@@ -3,8 +3,8 @@ import tempfile
 import base64
 import streamlit as st
 import streamlit.components.v1 as components
-from app.utilities.extract_text import extract_text_and_positions, CATEGORY_COLORS
-from app.utilities.redact_pdf import redact_pdf_with_positions
+from utilities.extract_text import extract_text_and_positions, CATEGORY_COLORS
+from utilities.redact_pdf import redact_pdf_with_positions
 
 # Temporary directory
 temp_dir = tempfile.mkdtemp()
