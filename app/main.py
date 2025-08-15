@@ -3,13 +3,13 @@ import os
 import base64
 import streamlit as st
 
-from app.utilities.extract_text import (
+from utilities.extract_text import (
     CATEGORY_DEFS,
     DEFAULT_CATEGORY_KEYS,
     detect_matches_in_pdf,
     build_summary_counts,
 )
-from app.utilities.redact_pdf import (
+from utilities.redact_pdf import (
     make_preview_pdf,
     apply_redactions_pdf,
 )
