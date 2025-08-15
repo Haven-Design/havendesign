@@ -1,5 +1,5 @@
 import fitz  # PyMuPDF
-from app.utilities.extract_text import CATEGORY_DEFS
+from utilities.extract_text import CATEGORY_DEFS
 
 # A safer neutral fill for preview (ADA-friendly overlay without hiding content)
 PREVIEW_FILL = (0.85, 0.85, 0.85)  # light gray
