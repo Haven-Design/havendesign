@@ -1,6 +1,6 @@
 import fitz
 from typing import List
-from app.utilities.extract_text import Hit
+from utilities.extract_text import Hit
 
 CATEGORY_PATTERNS: dict[str, str] = {
     "email": "#FF6B6B",
