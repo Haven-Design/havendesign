@@ -74,13 +74,15 @@ if st.button("Scan for Redacted Phrases") and uploaded_file:
     with open(input_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
+    # Extract hits
     hits = extract_text_and_positions(input_path, selected_params)
     st.session_state["hits"] = hits
 
-    # Use index + page as unique ID
+    # Generate unique IDs for hits
     selected_hit_ids = {hit["page"] * 1_000_000 + idx for idx, hit in enumerate(hits)}
     st.session_state["selected_hit_ids"] = selected_hit_ids
 
+    # Scroll to results section
     components.html(
         """
         <script>
@@ -97,10 +99,12 @@ if st.button("Scan for Redacted Phrases") and uploaded_file:
 # -----------------------
 if hits:
     left_col, right_col = st.columns([1, 1])
+
     with left_col:
         st.markdown("<div id='results-section'></div>", unsafe_allow_html=True)
         st.markdown("### Redacted Phrases")
 
+        # Select All / Deselect All button
         if st.button("Deselect All" if selected_hit_ids else "Select All"):
             if selected_hit_ids:
                 selected_hit_ids.clear()
@@ -130,7 +134,7 @@ if hits:
             checked = hit_id in selected_hit_ids
             label = f"[{hit['category']}] {hit['text']} (p{hit['page']+1})"
             if hit["count"] > 1:
-                label += f" ×{hit['count']}"  # show duplicate count
+                label += f" ×{hit['count']}"
             if st.checkbox(label, key=f"hit_{hit_id}", value=checked):
                 selected_hit_ids.add(hit_id)
             else:
