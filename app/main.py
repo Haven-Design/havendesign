@@ -11,19 +11,15 @@ st.set_page_config(layout="wide")
 st.title("PDF Redactor Tool")
 
 # -----------------------
-# Session state init (type-safe)
+# Session state init
 # -----------------------
 if "hits" not in st.session_state:
-    hits: List[Hit] = []
-    st.session_state["hits"] = hits
-else:
-    hits = st.session_state["hits"]
+    st.session_state["hits"] = []
+hits: List[Hit] = st.session_state["hits"]
 
 if "selected_hit_ids" not in st.session_state:
-    selected_hit_ids: Set[int] = set()
-    st.session_state["selected_hit_ids"] = selected_hit_ids
-else:
-    selected_hit_ids = st.session_state["selected_hit_ids"]
+    st.session_state["selected_hit_ids"] = set()
+selected_hit_ids: Set[int] = st.session_state["selected_hit_ids"]
 
 # -----------------------
 # File upload
@@ -74,13 +70,11 @@ if st.button("Scan for Redacted Phrases") and uploaded_file:
     with open(input_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-    # Extract hits
-    hits = extract_text_and_positions(input_path, selected_params)
-    st.session_state["hits"] = hits
+    # Extract hits (always returns a list)
+    hits[:] = extract_text_and_positions(input_path, selected_params) or []
 
-    # Generate unique IDs for hits
-    selected_hit_ids = {hit["page"] * 1_000_000 + idx for idx, hit in enumerate(hits)}
-    st.session_state["selected_hit_ids"] = selected_hit_ids
+    # Reset selected_hit_ids
+    selected_hit_ids.clear()
 
     # Scroll to results section
     components.html(
@@ -105,12 +99,13 @@ if hits:
         st.markdown("### Redacted Phrases")
 
         # Select All / Deselect All button
-        if st.button("Deselect All" if selected_hit_ids else "Select All"):
+        if st.button("Select / Deselect All"):
             if selected_hit_ids:
                 selected_hit_ids.clear()
             else:
-                selected_hit_ids = {hit["page"] * 1_000_000 + idx for idx, hit in enumerate(hits)}
-            st.session_state["selected_hit_ids"] = selected_hit_ids
+                selected_hit_ids.update({
+                    hit["page"] * 1_000_000 + idx for idx, hit in enumerate(hits)
+                })
 
         st.markdown(
             """
@@ -133,17 +128,20 @@ if hits:
             hit_id = hit["page"] * 1_000_000 + idx
             checked = hit_id in selected_hit_ids
             label = f"[{hit['category']}] {hit['text']} (p{hit['page']+1})"
-            if hit["count"] > 1:
+            if hit.get("count", 1) > 1:
                 label += f" ×{hit['count']}"
             if st.checkbox(label, key=f"hit_{hit_id}", value=checked):
                 selected_hit_ids.add(hit_id)
             else:
                 selected_hit_ids.discard(hit_id)
-            st.session_state["selected_hit_ids"] = selected_hit_ids
         st.markdown("</div>", unsafe_allow_html=True)
 
+        # Prepare preview PDF
         preview_pdf_path = os.path.join(temp_dir, "preview.pdf")
-        hits_to_redact = [hit for idx, hit in enumerate(hits) if (hit["page"] * 1_000_000 + idx) in selected_hit_ids]
+        hits_to_redact = [
+            hit for idx, hit in enumerate(hits)
+            if (hit["page"] * 1_000_000 + idx) in selected_hit_ids
+        ]
         redact_pdf_with_hits(input_path, hits_to_redact, preview_pdf_path, preview_mode=True)
 
         with open(preview_pdf_path, "rb") as f:
