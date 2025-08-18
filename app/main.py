@@ -5,7 +5,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from typing import List, Set
 from utilities.extract_text import extract_text_and_positions, Hit
-from utilities.redact_pdf import redact_pdf_with_hits
+from utilities.redact_pdf import redact_pdf_with_hits, CATEGORY_COLORS
 
 st.set_page_config(layout="wide")
 st.title("PDF Redactor Tool")
@@ -16,6 +16,8 @@ if "selected_hit_ids" not in st.session_state:
     st.session_state["selected_hit_ids"] = set()
 if "input_path" not in st.session_state:
     st.session_state["input_path"] = None
+if "param_states" not in st.session_state:
+    st.session_state["param_states"] = {}
 
 hits: List[Hit] = st.session_state["hits"]
 selected_hit_ids: Set[int] = st.session_state["selected_hit_ids"]
@@ -38,18 +40,29 @@ redaction_parameters = {
 }
 
 st.subheader("Select Redaction Parameters")
+
+# Select All button
+col_btn, _ = st.columns([1,3])
+with col_btn:
+    if st.button("Select All Parameters"):
+        for key in redaction_parameters.values():
+            st.session_state["param_states"][key] = True
+
 col1, col2 = st.columns(2)
 selected_params: List[str] = []
 
 for i, (label, key) in enumerate(redaction_parameters.items()):
+    if key not in st.session_state["param_states"]:
+        st.session_state["param_states"][key] = False
     if i % 2 == 0:
         with col1:
-            if st.checkbox(label, key=key, value=False):  # unchecked by default
-                selected_params.append(key)
+            checked = st.checkbox(label, key=key, value=st.session_state["param_states"][key])
     else:
         with col2:
-            if st.checkbox(label, key=key, value=False):
-                selected_params.append(key)
+            checked = st.checkbox(label, key=key, value=st.session_state["param_states"][key])
+    st.session_state["param_states"][key] = checked
+    if checked:
+        selected_params.append(key)
 
 custom_phrase = st.text_input("Add a custom phrase to redact", placeholder="Type phrase and press Enter")
 if custom_phrase:
@@ -89,10 +102,14 @@ if hits:
             .scroll-box {
                 max-height: 400px;
                 overflow-y: auto;
-                padding: 10px;
-                border: 1px solid #ccc;
-                border-radius: 5px;
-                background-color: #f9f9f9;
+                padding: 5px;
+            }
+            .color-label {
+                display: inline-block;
+                width: 12px;
+                height: 12px;
+                margin-right: 6px;
+                border-radius: 3px;
             }
             </style>
             """,
@@ -103,8 +120,9 @@ if hits:
         for idx, hit in enumerate(hits):
             hit_id = hit.page * 1_000_000 + idx
             checked = hit_id in selected_hit_ids
-            label = f"[{hit.category}] {hit.text} (p{hit.page+1})"
-            if st.checkbox(label, key=f"hit_{hit_id}", value=checked):
+            color = CATEGORY_COLORS.get(hit.category, "#000000")
+            label_html = f"<span class='color-label' style='background-color:{color}'></span>[{hit.category}] {hit.text} (p{hit.page+1})"
+            if st.checkbox(label_html, key=f"hit_{hit_id}", value=checked):
                 selected_hit_ids.add(hit_id)
             else:
                 selected_hit_ids.discard(hit_id)

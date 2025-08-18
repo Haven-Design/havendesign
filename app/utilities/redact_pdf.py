@@ -1,6 +1,6 @@
 import fitz
 from typing import List
-from extract_text import Hit
+from .extract_text import Hit
 
 CATEGORY_COLORS = {
     "email": "#FF6B6B",
@@ -22,11 +22,13 @@ def redact_pdf_with_hits(input_pdf: str, hits: List[Hit], output_pdf: str, previ
 
     for hit in hits:
         page = doc[hit.page]
+        rect = hit.rect
         if preview_mode:
             color = CATEGORY_COLORS.get(hit.category, "#000000")
-            page.draw_rect(hit.rect, color=fitz.utils.getColor(color), fill=None, width=2)
+            rgba = fitz.utils.getColor(color) + (0.3,)  # semi-transparent fill
+            page.draw_rect(rect, color=fitz.utils.getColor(color), fill=rgba, width=1)
         else:
-            page.add_redact_annot(hit.rect, fill=(0, 0, 0))
+            page.add_redact_annot(rect, fill=(0, 0, 0))
 
     if not preview_mode:
         doc.apply_redactions()
