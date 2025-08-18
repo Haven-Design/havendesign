@@ -1,8 +1,7 @@
 import re
 import fitz
-from typing import List, Tuple, NamedTuple
+from typing import List, NamedTuple
 
-# Hit data structure
 class Hit(NamedTuple):
     id: int
     text: str
@@ -15,7 +14,7 @@ CATEGORY_PATTERNS = {
     "phone": r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
     "credit_card": r"\b(?:\d[ -]*?){13,16}\b",
     "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
-    "drivers_license": r"\b[A-Z0-9]{1,9}\b",
+    "drivers_license": r"\b[A-Z0-9]{5,15}\b",
     "date": r"\b(?:\d{1,2}[/.-]){2}\d{2,4}\b",
     "address": r"\d{1,5}\s\w+(\s\w+)*",
     "name": r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b",
@@ -42,7 +41,7 @@ CATEGORY_PRIORITY = [
 def extract_text_and_positions(pdf_path: str, selected_params: List[str]) -> List[Hit]:
     doc = fitz.open(pdf_path)
     hits: List[Hit] = []
-    seen_texts = set()
+    seen_texts = {}
 
     for page_num, page in enumerate(doc):
         blocks = page.get_text("dict")["blocks"]
@@ -52,31 +51,40 @@ def extract_text_and_positions(pdf_path: str, selected_params: List[str]) -> Lis
             for line in block["lines"]:
                 for span in line["spans"]:
                     span_text = span["text"]
+
                     for category in CATEGORY_PRIORITY:
                         if category not in selected_params:
                             continue
+
                         if category in CATEGORY_PATTERNS:
                             pattern = CATEGORY_PATTERNS[category]
                             for match in re.finditer(pattern, span_text):
                                 match_text = match.group()
                                 key = (match_text, page_num)
+
+                                # Conflict resolution: keep only highest priority
                                 if key in seen_texts:
+                                    existing_category = seen_texts[key]
+                                    if CATEGORY_PRIORITY.index(category) < CATEGORY_PRIORITY.index(existing_category):
+                                        # Replace with higher priority
+                                        for i, h in enumerate(hits):
+                                            if h.text == match_text and h.page == page_num:
+                                                hits[i] = Hit(h.id, match_text, category, page_num, fitz.Rect(span["bbox"]))
+                                        seen_texts[key] = category
                                     continue
-                                seen_texts.add(key)
+
+                                seen_texts[key] = category
                                 rect = fitz.Rect(span["bbox"])
                                 hit_id = len(hits)
                                 hits.append(Hit(hit_id, match_text, category, page_num, rect))
-                                break
                         else:  # custom phrase
                             if category.lower() in span_text.lower():
                                 key = (category, page_num)
-                                if key in seen_texts:
-                                    continue
-                                seen_texts.add(key)
-                                rect = fitz.Rect(span["bbox"])
-                                hit_id = len(hits)
-                                hits.append(Hit(hit_id, category, "custom", page_num, rect))
-                                break
+                                if key not in seen_texts:
+                                    seen_texts[key] = "custom"
+                                    rect = fitz.Rect(span["bbox"])
+                                    hit_id = len(hits)
+                                    hits.append(Hit(hit_id, category, "custom", page_num, rect))
 
     doc.close()
     return hits

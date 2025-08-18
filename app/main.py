@@ -4,7 +4,7 @@ import base64
 import streamlit as st
 import streamlit.components.v1 as components
 from typing import List, Set
-from utilities.extract_text import extract_text_and_positions, Hit
+from utilities.extract_text import extract_text_and_positions, Hit, CATEGORY_PRIORITY
 from utilities.redact_pdf import redact_pdf_with_hits, CATEGORY_COLORS
 
 st.set_page_config(layout="wide")
@@ -50,14 +50,16 @@ st.subheader("Select Redaction Parameters")
 col1, col2 = st.columns(2)
 selected_params: List[str] = []
 
-# Add Select All button
+# Select All button
 if st.button("Select All Parameters"):
     for key in redaction_parameters.values():
         st.session_state[key] = True
 
 for i, (label, key) in enumerate(redaction_parameters.items()):
-    if st.checkbox(label, key=key):
-        selected_params.append(key)
+    target_col = col1 if i % 2 == 0 else col2
+    with target_col:
+        if st.checkbox(label, key=key):
+            selected_params.append(key)
 
 custom_phrase = st.text_input("Add a custom phrase to redact", placeholder="Type phrase and press Enter")
 if custom_phrase:
@@ -74,7 +76,6 @@ if st.button("Scan for Redacted Phrases") and uploaded_file:
 
     hits[:] = extract_text_and_positions(input_path, selected_params) or []
     selected_hit_ids.clear()
-    # Default: all checked
     selected_hit_ids.update({hit.page * 1_000_000 + idx for idx, hit in enumerate(hits)})
 
     components.html(
@@ -102,59 +103,58 @@ if hits and st.session_state["input_path"]:
             """
             <style>
             .scroll-box {
-                max-height: 400px;
+                max-height: 420px;
                 overflow-y: auto;
                 padding: 8px;
                 border: 1px solid #ccc;
                 border-radius: 5px;
                 background-color: #fff;
             }
-            .phrase-row {
-                display: flex;
-                align-items: center;
-                margin-bottom: 6px;
-                font-size: 14px;
-            }
-            .color-box {
-                width: 12px;
-                height: 12px;
+            .category-header {
+                font-weight: bold;
+                margin-top: 10px;
+                margin-bottom: 5px;
+                padding: 3px 6px;
                 border-radius: 3px;
-                margin-right: 8px;
-                flex-shrink: 0;
+                color: white;
             }
             </style>
             """,
             unsafe_allow_html=True,
         )
 
-        st.markdown("<div class='scroll-box'>", unsafe_allow_html=True)
+        with st.container():
+            st.markdown("<div class='scroll-box'>", unsafe_allow_html=True)
 
-        for idx, hit in enumerate(hits):
-            hit_id = hit.page * 1_000_000 + idx
-            checked = hit_id in selected_hit_ids
-            color = CATEGORY_COLORS.get(hit.category, "#000000")
-            label_text = f"[{hit.category}] {hit.text} (p{hit.page+1})"
+            # Group hits by category
+            for category in CATEGORY_PRIORITY:
+                cat_hits = [(idx, h) for idx, h in enumerate(hits) if h.category == category]
+                if not cat_hits:
+                    continue
 
-            cols = st.columns([0.1, 0.9])
-            with cols[0]:
-                if st.checkbox("", key=f"hit_{hit_id}", value=checked):
-                    selected_hit_ids.add(hit_id)
-                else:
-                    selected_hit_ids.discard(hit_id)
-            with cols[1]:
+                color = CATEGORY_COLORS.get(category, "#000000")
                 st.markdown(
-                    f"<div class='phrase-row'><div class='color-box' style='background-color:{color}'></div>{label_text}</div>",
+                    f"<div class='category-header' style='background-color:{color}'>{category.upper()}</div>",
                     unsafe_allow_html=True,
                 )
 
-        st.markdown("</div>", unsafe_allow_html=True)
+                for idx, hit in cat_hits:
+                    hit_id = hit.page * 1_000_000 + idx
+                    checked = hit_id in selected_hit_ids
+                    label = f"{hit.text} (p{hit.page+1})"
+                    if st.checkbox(label, key=f"hit_{hit_id}", value=checked):
+                        selected_hit_ids.add(hit_id)
+                    else:
+                        selected_hit_ids.discard(hit_id)
 
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # Generate preview
         preview_pdf_path = os.path.join(temp_dir, "preview.pdf")
         hits_to_redact = [
             hit for idx, hit in enumerate(hits)
             if (hit.page * 1_000_000 + idx) in selected_hit_ids
         ]
-
         redact_pdf_with_hits(st.session_state["input_path"], hits_to_redact, preview_pdf_path, preview_mode=True)
 
         with open(preview_pdf_path, "rb") as f:
