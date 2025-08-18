@@ -3,19 +3,37 @@ import tempfile
 import base64
 import streamlit as st
 import streamlit.components.v1 as components
-from utilities.extract_text import extract_text_and_positions
-from utilities.redact_pdf import redact_pdf_with_positions
+from typing import List, Set
+from utilities.extract_text import extract_text_and_positions, Hit
+from utilities.redact_pdf import redact_pdf_with_hits
 
-# Temporary directory for previews
-temp_dir = tempfile.mkdtemp()
-
-# UI Title
+st.set_page_config(layout="wide")
 st.title("PDF Redactor Tool")
 
-# File uploader
+# -----------------------
+# Session state init (type-safe)
+# -----------------------
+if "hits" not in st.session_state:
+    hits: List[Hit] = []
+    st.session_state["hits"] = hits
+else:
+    hits = st.session_state["hits"]
+
+if "selected_hit_ids" not in st.session_state:
+    selected_hit_ids: Set[int] = set()
+    st.session_state["selected_hit_ids"] = selected_hit_ids
+else:
+    selected_hit_ids = st.session_state["selected_hit_ids"]
+
+# -----------------------
+# File upload
+# -----------------------
+temp_dir = tempfile.mkdtemp()
 uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
 
-# Parameter list for redactions
+# -----------------------
+# Redaction parameters
+# -----------------------
 redaction_parameters = {
     "Email Addresses": "email",
     "Phone Numbers": "phone",
@@ -30,121 +48,109 @@ redaction_parameters = {
     "VIN Numbers": "vin",
 }
 
-# Checkbox UI (default unchecked)
 st.subheader("Select Redaction Parameters")
 col1, col2 = st.columns(2)
-selected_params = []
-checkbox_states = {}
+selected_params: List[str] = []
 
 for i, (label, key) in enumerate(redaction_parameters.items()):
     if i % 2 == 0:
         with col1:
-            state = st.checkbox(label, value=False, key=key)
+            if st.checkbox(label, key=key):
+                selected_params.append(key)
     else:
         with col2:
-            state = st.checkbox(label, value=False, key=key)
-    checkbox_states[key] = state
-    if state:
-        selected_params.append(key)
+            if st.checkbox(label, key=key):
+                selected_params.append(key)
 
-# Select All button
-if st.button("Select All"):
-    for key in redaction_parameters.values():
-        st.session_state[key] = True
-
-# Extra custom phrase input
-custom_phrase = st.text_input(
-    "Add a custom phrase to redact",
-    placeholder="Type phrase and press Enter"
-)
+custom_phrase = st.text_input("Add a custom phrase to redact", placeholder="Type phrase and press Enter")
 if custom_phrase:
     selected_params.append(custom_phrase)
 
-# Scan button
+# -----------------------
+# Scan PDF
+# -----------------------
 if st.button("Scan for Redacted Phrases") and uploaded_file:
-    # Save uploaded PDF temporarily
     input_path = os.path.join(temp_dir, "input.pdf")
     with open(input_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-    try:
-        # Extract matches and positions
-        found_phrases, positions_by_category = extract_text_and_positions(
-            input_path, selected_params
+    hits = extract_text_and_positions(input_path, selected_params)
+    st.session_state["hits"] = hits
+
+    # Use index + page as unique ID
+    selected_hit_ids = {hit["page"] * 1_000_000 + idx for idx, hit in enumerate(hits)}
+    st.session_state["selected_hit_ids"] = selected_hit_ids
+
+    components.html(
+        """
+        <script>
+            setTimeout(function(){
+                document.getElementById("results-section").scrollIntoView({behavior: "smooth"});
+            }, 300);
+        </script>
+        """,
+        height=0,
+    )
+
+# -----------------------
+# Display results & preview
+# -----------------------
+if hits:
+    left_col, right_col = st.columns([1, 1])
+    with left_col:
+        st.markdown("<div id='results-section'></div>", unsafe_allow_html=True)
+        st.markdown("### Redacted Phrases")
+
+        if st.button("Deselect All" if selected_hit_ids else "Select All"):
+            if selected_hit_ids:
+                selected_hit_ids.clear()
+            else:
+                selected_hit_ids = {hit["page"] * 1_000_000 + idx for idx, hit in enumerate(hits)}
+            st.session_state["selected_hit_ids"] = selected_hit_ids
+
+        st.markdown(
+            """
+            <style>
+            .scroll-box {
+                max-height: 400px;
+                overflow-y: auto;
+                padding: 10px;
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                background-color: #f9f9f9;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
         )
 
-        # Inject auto-scroll to results section
-        components.html("""
-            <script>
-                setTimeout(function(){
-                    document.getElementById("results-section").scrollIntoView({behavior: "smooth"});
-                }, 300);
-            </script>
-        """, height=0)
+        st.markdown("<div class='scroll-box'>", unsafe_allow_html=True)
+        for idx, hit in enumerate(hits):
+            hit_id = hit["page"] * 1_000_000 + idx
+            checked = hit_id in selected_hit_ids
+            label = f"[{hit['category']}] {hit['text']} (p{hit['page']+1})"
+            if hit["count"] > 1:
+                label += f" ×{hit['count']}"  # show duplicate count
+            if st.checkbox(label, key=f"hit_{hit_id}", value=checked):
+                selected_hit_ids.add(hit_id)
+            else:
+                selected_hit_ids.discard(hit_id)
+            st.session_state["selected_hit_ids"] = selected_hit_ids
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        # Layout: Left list, Right preview
-        left_col, right_col = st.columns([1, 1])
+        preview_pdf_path = os.path.join(temp_dir, "preview.pdf")
+        hits_to_redact = [hit for idx, hit in enumerate(hits) if (hit["page"] * 1_000_000 + idx) in selected_hit_ids]
+        redact_pdf_with_hits(input_path, hits_to_redact, preview_pdf_path, preview_mode=True)
 
-        with st.container():
-            st.markdown("<div id='results-section'></div>", unsafe_allow_html=True)
+        with open(preview_pdf_path, "rb") as f:
+            st.download_button("Download PDF", f, file_name="redacted.pdf")
 
-            # Left: Scrollable list
-            with left_col:
-                st.markdown("### Found Phrases")
-
-                if found_phrases:
-                    st.markdown(
-                        """
-                        <style>
-                        .scroll-box {
-                            max-height: 400px;
-                            overflow-y: auto;
-                            padding: 10px;
-                            border: 1px solid #ccc;
-                            border-radius: 5px;
-                            background-color: #f9f9f9;
-                        }
-                        .phrase-email { color: #1f77b4; }
-                        .phrase-phone { color: #ff7f0e; }
-                        .phrase-credit_card { color: #2ca02c; }
-                        .phrase-ssn { color: #d62728; }
-                        .phrase-drivers_license { color: #9467bd; }
-                        .phrase-date { color: #8c564b; }
-                        .phrase-address { color: #e377c2; }
-                        .phrase-name { color: #7f7f7f; }
-                        .phrase-ip_address { color: #bcbd22; }
-                        .phrase-bank_account { color: #17becf; }
-                        .phrase-vin { color: #17a589; }
-                        </style>
-                        """,
-                        unsafe_allow_html=True
-                    )
-
-                    formatted_phrases = [
-                        f"<div class='phrase-{cat}'>{phrase}</div>"
-                        for phrase, cat in found_phrases
-                    ]
-                    st.markdown(
-                        "<div class='scroll-box'>" + "<br>".join(formatted_phrases) + "</div>",
-                        unsafe_allow_html=True
-                    )
-                else:
-                    st.write("No matches found.")
-
-                # Download button always visible
-                preview_pdf_path = os.path.join(temp_dir, "preview.pdf")
-                redact_pdf_with_positions(input_path, positions_by_category, preview_pdf_path, preview=True)
-                with open(preview_pdf_path, "rb") as f:
-                    st.download_button("Download PDF", f, file_name="redacted.pdf")
-
-            # Right: Preview
-            with right_col:
-                st.markdown("### Preview")
-                with open(preview_pdf_path, "rb") as f:
-                    pdf_bytes = f.read()
-                base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
-                pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="500px"></iframe>'
-                st.markdown(pdf_display, unsafe_allow_html=True)
-
-    except Exception as e:
-        st.error(f"Error processing PDF: {e}")
+    with right_col:
+        st.markdown("### Preview")
+        with open(preview_pdf_path, "rb") as f:
+            pdf_bytes = f.read()
+        b64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+        st.markdown(
+            f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="500px"></iframe>',
+            unsafe_allow_html=True,
+        )
