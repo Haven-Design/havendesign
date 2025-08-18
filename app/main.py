@@ -119,17 +119,15 @@ if hits:
         select_all = st.checkbox("Select / Deselect All", value=st.session_state["select_all_hits"])
         st.session_state["select_all_hits"] = select_all
         if select_all:
-            selected_hit_ids.update({hit["page"] * 1_000_000 + idx for idx, hit in enumerate(hits)})
+            selected_hit_ids.update({hit.page * 1_000_000 + idx for idx, hit in enumerate(hits)})
         else:
             selected_hit_ids.clear()
 
-        # Individual hit checkboxes
+        # Individual hit checkboxes (using dot notation for Hit)
         for idx, hit in enumerate(hits):
-            hit_id = hit["page"] * 1_000_000 + idx
+            hit_id = hit.page * 1_000_000 + idx
             checked = hit_id in selected_hit_ids
-            label = f"[{hit['category']}] {hit['text']} (p{hit['page']+1})"
-            if hit.get("count", 1) > 1:
-                label += f" ×{hit['count']}"
+            label = f"[{hit.category}] {hit.text} (p{hit.page+1})"
             if st.checkbox(label, key=f"hit_{hit_id}", value=checked):
                 selected_hit_ids.add(hit_id)
             else:
@@ -141,7 +139,7 @@ if hits:
         preview_pdf_path = os.path.join(temp_dir, "preview.pdf")
         hits_to_redact = [
             hit for idx, hit in enumerate(hits)
-            if (hit["page"] * 1_000_000 + idx) in selected_hit_ids
+            if (hit.page * 1_000_000 + idx) in selected_hit_ids
         ]
         redact_pdf_with_hits(input_path, hits_to_redact, preview_pdf_path, preview_mode=True)
 
