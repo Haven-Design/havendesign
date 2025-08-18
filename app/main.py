@@ -21,6 +21,9 @@ if "selected_hit_ids" not in st.session_state:
     st.session_state["selected_hit_ids"] = set()
 selected_hit_ids: Set[int] = st.session_state["selected_hit_ids"]
 
+if "select_all_hits" not in st.session_state:
+    st.session_state["select_all_hits"] = False
+
 # -----------------------
 # File upload
 # -----------------------
@@ -70,13 +73,13 @@ if st.button("Scan for Redacted Phrases") and uploaded_file:
     with open(input_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-    # Extract hits (always returns a list)
-    hits[:] = extract_text_and_positions(input_path, selected_params) or []
+    # Extract hits
+    extracted_hits = extract_text_and_positions(input_path, selected_params) or []
+    hits[:] = extracted_hits  # update session_state hits
+    selected_hit_ids.clear()  # reset selections
+    st.session_state["select_all_hits"] = False
 
-    # Reset selected_hit_ids
-    selected_hit_ids.clear()
-
-    # Scroll to results section
+    # Scroll to results
     components.html(
         """
         <script>
@@ -98,15 +101,6 @@ if hits:
         st.markdown("<div id='results-section'></div>", unsafe_allow_html=True)
         st.markdown("### Redacted Phrases")
 
-        # Select All / Deselect All button
-        if st.button("Select / Deselect All"):
-            if selected_hit_ids:
-                selected_hit_ids.clear()
-            else:
-                selected_hit_ids.update({
-                    hit["page"] * 1_000_000 + idx for idx, hit in enumerate(hits)
-                })
-
         st.markdown(
             """
             <style>
@@ -124,19 +118,35 @@ if hits:
         )
 
         st.markdown("<div class='scroll-box'>", unsafe_allow_html=True)
+
+        # --- Persistent Select All checkbox ---
+        select_all = st.checkbox(
+            "Select / Deselect All",
+            value=st.session_state.get("select_all_hits", False)
+        )
+        st.session_state["select_all_hits"] = select_all
+
+        if select_all:
+            selected_hit_ids.update({hit["page"] * 1_000_000 + idx for idx, hit in enumerate(hits)})
+        else:
+            selected_hit_ids.clear()
+
+        # --- Individual hit checkboxes ---
         for idx, hit in enumerate(hits):
             hit_id = hit["page"] * 1_000_000 + idx
             checked = hit_id in selected_hit_ids
             label = f"[{hit['category']}] {hit['text']} (p{hit['page']+1})"
             if hit.get("count", 1) > 1:
                 label += f" ×{hit['count']}"
+
             if st.checkbox(label, key=f"hit_{hit_id}", value=checked):
                 selected_hit_ids.add(hit_id)
             else:
                 selected_hit_ids.discard(hit_id)
+
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Prepare preview PDF
+        # --- Prepare preview PDF ---
         preview_pdf_path = os.path.join(temp_dir, "preview.pdf")
         hits_to_redact = [
             hit for idx, hit in enumerate(hits)
