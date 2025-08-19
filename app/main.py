@@ -11,14 +11,12 @@ st.set_page_config(layout="wide")
 st.title("PDF Redactor Tool")
 
 # -----------------------
-# Session state init
+# Session state
 # -----------------------
 if "hits" not in st.session_state:
     st.session_state["hits"] = []
 if "selected_hit_ids" not in st.session_state:
     st.session_state["selected_hit_ids"] = set()
-if "input_path" not in st.session_state:
-    st.session_state["input_path"] = None
 
 hits: List[Hit] = st.session_state["hits"]
 selected_hit_ids: Set[int] = st.session_state["selected_hit_ids"]
@@ -48,19 +46,25 @@ redaction_parameters = {
 
 st.subheader("Select Redaction Parameters")
 col1, col2 = st.columns(2)
-selected_params: List[str] = []
+param_checkboxes = {}
+for i, (label, key) in enumerate(redaction_parameters.items()):
+    if i % 2 == 0:
+        with col1:
+            param_checkboxes[key] = st.checkbox(label, key=f"param_{key}")
+    else:
+        with col2:
+            param_checkboxes[key] = st.checkbox(label, key=f"param_{key}")
 
-# Select All button
+# Select All Parameters button
 if st.button("Select All Parameters"):
     for key in redaction_parameters.values():
-        st.session_state[key] = True
+        st.session_state[f"param_{key}"] = True
+    st.rerun()
 
-for i, (label, key) in enumerate(redaction_parameters.items()):
-    target_col = col1 if i % 2 == 0 else col2
-    with target_col:
-        if st.checkbox(label, key=key):
-            selected_params.append(key)
+# Gather selected parameters
+selected_params: List[str] = [k for k, v in param_checkboxes.items() if v]
 
+# Custom phrase
 custom_phrase = st.text_input("Add a custom phrase to redact", placeholder="Type phrase and press Enter")
 if custom_phrase:
     selected_params.append(custom_phrase)
@@ -72,27 +76,20 @@ if st.button("Scan for Redacted Phrases") and uploaded_file:
     input_path = os.path.join(temp_dir, "input.pdf")
     with open(input_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
-    st.session_state["input_path"] = input_path
 
     hits[:] = extract_text_and_positions(input_path, selected_params) or []
     selected_hit_ids.clear()
-    selected_hit_ids.update({hit.page * 1_000_000 + idx for idx, hit in enumerate(hits)})
+    selected_hit_ids.update({hit.id for hit in hits})  # all selected by default
 
     components.html(
-        """
-        <script>
-            setTimeout(function(){
-                document.getElementById("results-section").scrollIntoView({behavior: "smooth"});
-            }, 300);
-        </script>
-        """,
+        "<script>setTimeout(function(){document.getElementById('results-section').scrollIntoView({behavior: 'smooth'});},300);</script>",
         height=0,
     )
 
 # -----------------------
 # Display results & preview
 # -----------------------
-if hits and st.session_state["input_path"]:
+if hits:
     left_col, right_col = st.columns([1, 1])
 
     with left_col:
@@ -103,59 +100,44 @@ if hits and st.session_state["input_path"]:
             """
             <style>
             .scroll-box {
-                max-height: 420px;
+                max-height: 400px;
                 overflow-y: auto;
-                padding: 8px;
+                padding: 10px;
                 border: 1px solid #ccc;
                 border-radius: 5px;
-                background-color: #fff;
+                background-color: #f9f9f9;
             }
-            .category-header {
-                font-weight: bold;
-                margin-top: 10px;
-                margin-bottom: 5px;
+            .hit-label {
+                display: block;
                 padding: 3px 6px;
-                border-radius: 3px;
-                color: white;
+                margin-bottom: 2px;
+                border-radius: 4px;
+                color: #fff;
+                font-size: 13px;
             }
             </style>
             """,
             unsafe_allow_html=True,
         )
 
-        with st.container():
-            st.markdown("<div class='scroll-box'>", unsafe_allow_html=True)
+        st.markdown("<div class='scroll-box'>", unsafe_allow_html=True)
 
-            # Group hits by category
-            for category in CATEGORY_PRIORITY:
-                cat_hits = [(idx, h) for idx, h in enumerate(hits) if h.category == category]
-                if not cat_hits:
-                    continue
+        for hit in hits:
+            color = CATEGORY_COLORS.get(hit.category, "#666666")
+            checked = hit.id in selected_hit_ids
+            label_html = f"<span class='hit-label' style='background-color:{color}'>{hit.category}: {hit.text} (p{hit.page+1})</span>"
+            if st.checkbox(label_html, value=checked, key=f"hit_{hit.id}", help=f"{hit.category}", label_visibility="collapsed"):
+                selected_hit_ids.add(hit.id)
+            else:
+                selected_hit_ids.discard(hit.id)
 
-                color = CATEGORY_COLORS.get(category, "#000000")
-                st.markdown(
-                    f"<div class='category-header' style='background-color:{color}'>{category.upper()}</div>",
-                    unsafe_allow_html=True,
-                )
+        st.markdown("</div>", unsafe_allow_html=True)
 
-                for idx, hit in cat_hits:
-                    hit_id = hit.page * 1_000_000 + idx
-                    checked = hit_id in selected_hit_ids
-                    label = f"{hit.text} (p{hit.page+1})"
-                    if st.checkbox(label, key=f"hit_{hit_id}", value=checked):
-                        selected_hit_ids.add(hit_id)
-                    else:
-                        selected_hit_ids.discard(hit_id)
-
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        # Generate preview
+        # Generate preview and download
+        input_path = os.path.join(temp_dir, "input.pdf")
         preview_pdf_path = os.path.join(temp_dir, "preview.pdf")
-        hits_to_redact = [
-            hit for idx, hit in enumerate(hits)
-            if (hit.page * 1_000_000 + idx) in selected_hit_ids
-        ]
-        redact_pdf_with_hits(st.session_state["input_path"], hits_to_redact, preview_pdf_path, preview_mode=True)
+        hits_to_redact = [hit for hit in hits if hit.id in selected_hit_ids]
+        redact_pdf_with_hits(input_path, hits_to_redact, preview_pdf_path, preview_mode=True)
 
         with open(preview_pdf_path, "rb") as f:
             st.download_button("Download PDF", f, file_name="redacted.pdf")

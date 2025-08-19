@@ -10,15 +10,15 @@ class Hit(NamedTuple):
     rect: fitz.Rect
 
 CATEGORY_PATTERNS = {
-    "email": r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-    "phone": r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
-    "credit_card": r"\b(?:\d[ -]*?){13,16}\b",
-    "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
-    "drivers_license": r"\b[A-Z0-9]{5,15}\b",
-    "date": r"\b(?:\d{1,2}[/.-]){2}\d{2,4}\b",
-    "address": r"\d{1,5}\s\w+(\s\w+)*",
+    "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+    "phone": r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})\b",
+    "credit_card": r"\b(?!\d{4}\s*\1{3})(?:\d{4}[-\s]?){3,4}\d{3,4}\b",
+    "ssn": r"\b(?!000|666|9\d\d)(\d{3})-(?!00)(\d{2})-(?!0000)(\d{4})\b",
+    "drivers_license": r"\b([A-Z]\d{7}|\d{8}|[A-Z0-9]{5,9})\b",
+    "date": r"\b(?:0?[1-9]|1[0-2])[-/](0?[1-9]|[12]\d|3[01])[-/](\d{2}|\d{4})\b",
+    "address": r"\b\d{1,5}\s(?:[A-Z][a-z]*\s?){1,4}(Street|St|Ave|Avenue|Rd|Road|Blvd|Lane|Ln|Dr|Drive|Court|Ct)\b",
     "name": r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b",
-    "ip_address": r"\b\d{1,3}(?:\.\d{1,3}){3}\b",
+    "ip_address": r"\b((25[0-5]|2[0-4]\d|[01]?\d?\d)(\.|$)){4}\b",
     "bank_account": r"\b\d{9,18}\b",
     "vin": r"\b[A-HJ-NPR-Z0-9]{17}\b",
 }
@@ -41,7 +41,7 @@ CATEGORY_PRIORITY = [
 def extract_text_and_positions(pdf_path: str, selected_params: List[str]) -> List[Hit]:
     doc = fitz.open(pdf_path)
     hits: List[Hit] = []
-    seen_texts = {}
+    seen_texts = set()
 
     for page_num, page in enumerate(doc):
         blocks = page.get_text("dict")["blocks"]
@@ -51,40 +51,27 @@ def extract_text_and_positions(pdf_path: str, selected_params: List[str]) -> Lis
             for line in block["lines"]:
                 for span in line["spans"]:
                     span_text = span["text"]
-
                     for category in CATEGORY_PRIORITY:
                         if category not in selected_params:
                             continue
-
                         if category in CATEGORY_PATTERNS:
-                            pattern = CATEGORY_PATTERNS[category]
-                            for match in re.finditer(pattern, span_text):
+                            for match in re.finditer(CATEGORY_PATTERNS[category], span_text):
                                 match_text = match.group()
                                 key = (match_text, page_num)
-
-                                # Conflict resolution: keep only highest priority
                                 if key in seen_texts:
-                                    existing_category = seen_texts[key]
-                                    if CATEGORY_PRIORITY.index(category) < CATEGORY_PRIORITY.index(existing_category):
-                                        # Replace with higher priority
-                                        for i, h in enumerate(hits):
-                                            if h.text == match_text and h.page == page_num:
-                                                hits[i] = Hit(h.id, match_text, category, page_num, fitz.Rect(span["bbox"]))
-                                        seen_texts[key] = category
                                     continue
-
-                                seen_texts[key] = category
+                                seen_texts.add(key)
                                 rect = fitz.Rect(span["bbox"])
-                                hit_id = len(hits)
-                                hits.append(Hit(hit_id, match_text, category, page_num, rect))
-                        else:  # custom phrase
+                                hits.append(Hit(len(hits), match_text, category, page_num, rect))
+                                break
+                        else:
                             if category.lower() in span_text.lower():
                                 key = (category, page_num)
-                                if key not in seen_texts:
-                                    seen_texts[key] = "custom"
-                                    rect = fitz.Rect(span["bbox"])
-                                    hit_id = len(hits)
-                                    hits.append(Hit(hit_id, category, "custom", page_num, rect))
-
+                                if key in seen_texts:
+                                    continue
+                                seen_texts.add(key)
+                                rect = fitz.Rect(span["bbox"])
+                                hits.append(Hit(len(hits), category, "custom", page_num, rect))
+                                break
     doc.close()
     return hits
