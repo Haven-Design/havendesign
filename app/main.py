@@ -1,153 +1,292 @@
 import os
-import tempfile
+import io
 import base64
+import tempfile
+from typing import List, Set, Dict
 import streamlit as st
 import streamlit.components.v1 as components
-from typing import List, Set
-from utilities.extract_text import extract_text_and_positions, Hit, CATEGORY_PRIORITY
-from utilities.redact_pdf import redact_pdf_with_hits, CATEGORY_COLORS
+
+from utilities.extract_text import (
+    Hit,
+    CATEGORY_COLORS,
+    CATEGORY_LABELS,
+    extract_hits_for_file,
+)
+from utilities.redact_pdf import (
+    build_pdf_preview,
+    save_pdf_blackfill,
+    save_docx_redacted,
+    save_txt_redacted,
+    save_xlsx_redacted,
+)
 
 st.set_page_config(layout="wide")
-st.title("PDF Redactor Tool")
+st.title("PDF / DOCX / TXT / XLSX Redactor")
 
 # -----------------------
-# Session state
+# session state
 # -----------------------
 if "hits" not in st.session_state:
     st.session_state["hits"] = []
 if "selected_hit_ids" not in st.session_state:
     st.session_state["selected_hit_ids"] = set()
+if "file_bytes" not in st.session_state:
+    st.session_state["file_bytes"] = None
+if "file_name" not in st.session_state:
+    st.session_state["file_name"] = ""
+if "file_ext" not in st.session_state:
+    st.session_state["file_ext"] = ""
+if "params_checked" not in st.session_state:
+    st.session_state["params_checked"] = {}  # key->bool
+if "last_preview" not in st.session_state:
+    st.session_state["last_preview"] = b""
+if "scan_ran" not in st.session_state:
+    st.session_state["scan_ran"] = False
 
 hits: List[Hit] = st.session_state["hits"]
 selected_hit_ids: Set[int] = st.session_state["selected_hit_ids"]
 
-# -----------------------
-# File upload
-# -----------------------
 temp_dir = tempfile.mkdtemp()
-uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
 
 # -----------------------
-# Redaction parameters
+# file upload
 # -----------------------
-redaction_parameters = {
-    "Email Addresses": "email",
-    "Phone Numbers": "phone",
-    "Credit Card Numbers": "credit_card",
-    "Social Security Numbers": "ssn",
-    "Driver's Licenses": "drivers_license",
-    "Dates": "date",
-    "Addresses": "address",
-    "Names": "name",
-    "IP Addresses": "ip_address",
-    "Bank Account Numbers": "bank_account",
-    "VIN Numbers": "vin",
-}
+uploaded = st.file_uploader(
+    "Upload a file", type=["pdf", "docx", "txt", "xlsx"], accept_multiple_files=False
+)
+
+# -----------------------
+# parameter checkboxes
+# -----------------------
+PARAMS = [
+    ("email", "Email Addresses"),
+    ("phone", "Phone Numbers"),
+    ("credit_card", "Credit Card Numbers"),
+    ("ssn", "Social Security Numbers"),
+    ("drivers_license", "Driver's Licenses"),
+    ("date", "Dates"),
+    ("address", "Addresses"),
+    ("name", "Names"),
+    ("ip_address", "IP Addresses"),
+    ("bank_account", "Bank Account Numbers"),
+    ("vin", "VIN Numbers"),
+]
 
 st.subheader("Select Redaction Parameters")
-col1, col2 = st.columns(2)
-param_checkboxes = {}
-for i, (label, key) in enumerate(redaction_parameters.items()):
-    if i % 2 == 0:
-        with col1:
-            param_checkboxes[key] = st.checkbox(label, key=f"param_{key}")
-    else:
-        with col2:
-            param_checkboxes[key] = st.checkbox(label, key=f"param_{key}")
 
-# Select All Parameters button
-if st.button("Select All Parameters"):
-    for key in redaction_parameters.values():
-        st.session_state[f"param_{key}"] = True
-    st.rerun()
+c1, c2 = st.columns(2)
+# Select All for parameters
+param_keys = [p[0] for p in PARAMS]
+if "all_params_flag" not in st.session_state:
+    st.session_state["all_params_flag"] = False
 
-# Gather selected parameters
-selected_params: List[str] = [k for k, v in param_checkboxes.items() if v]
+def set_all(v: bool):
+    for k, _label in PARAMS:
+        st.session_state["params_checked"][k] = v
 
-# Custom phrase
-custom_phrase = st.text_input("Add a custom phrase to redact", placeholder="Type phrase and press Enter")
-if custom_phrase:
-    selected_params.append(custom_phrase)
+with c1:
+    if st.button("Select All Parameters"):
+        set_all(True)
+with c2:
+    if st.button("Deselect All Parameters"):
+        set_all(False)
+
+for i, (key, label) in enumerate(PARAMS):
+    col = c1 if i % 2 == 0 else c2
+    with col:
+        default_val = st.session_state["params_checked"].get(key, False)
+        st.session_state["params_checked"][key] = st.checkbox(
+            label, value=default_val, key=f"param_{key}"
+        )
+
+custom_phrase = st.text_input(
+    "Add a custom phrase (press Enter to add)", placeholder="e.g., Project Falcon"
+)
+selected_params = [k for k, v in st.session_state["params_checked"].items() if v]
+if custom_phrase.strip():
+    selected_params.append(custom_phrase.strip())
 
 # -----------------------
-# Scan PDF
+# scan
 # -----------------------
-if st.button("Scan for Redacted Phrases") and uploaded_file:
-    input_path = os.path.join(temp_dir, "input.pdf")
-    with open(input_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+def do_scan():
+    st.session_state["scan_ran"] = False
+    if not uploaded:
+        st.warning("Please upload a file first.")
+        return
+    if not selected_params:
+        st.warning("Please choose at least one parameter or add a custom phrase.")
+        return
 
-    hits[:] = extract_text_and_positions(input_path, selected_params) or []
-    selected_hit_ids.clear()
-    selected_hit_ids.update({hit.id for hit in hits})  # all selected by default
+    data = uploaded.read()
+    st.session_state["file_bytes"] = data
+    st.session_state["file_name"] = uploaded.name
+    st.session_state["file_ext"] = os.path.splitext(uploaded.name)[1].lower()
+
+    st.session_state["hits"] = extract_hits_for_file(
+        st.session_state["file_bytes"],
+        st.session_state["file_ext"],
+        selected_params,
+    )
+    st.session_state["selected_hit_ids"] = set(range(len(st.session_state["hits"])))
+    st.session_state["scan_ran"] = True
 
     components.html(
-        "<script>setTimeout(function(){document.getElementById('results-section').scrollIntoView({behavior: 'smooth'});},300);</script>",
+        """
+        <script>
+            setTimeout(function(){
+                var el = document.getElementById("results-section");
+                if (el) el.scrollIntoView({behavior:"smooth"});
+            }, 300);
+        </script>
+        """,
         height=0,
     )
 
+if st.button("Scan for Redacted Phrases"):
+    do_scan()
+
 # -----------------------
-# Display results & preview
+# results + preview
 # -----------------------
 if hits:
-    left_col, right_col = st.columns([1, 1])
+    left, right = st.columns([1, 1])
 
-    with left_col:
+    with left:
         st.markdown("<div id='results-section'></div>", unsafe_allow_html=True)
-        st.markdown("### Redacted Phrases")
+        st.subheader("Redacted Phrases")
 
+        # grouped by category with colors, in a scroll box
         st.markdown(
             """
             <style>
             .scroll-box {
-                max-height: 400px;
+                max-height: 420px;
                 overflow-y: auto;
-                padding: 10px;
+                padding: 8px 10px;
                 border: 1px solid #ccc;
-                border-radius: 5px;
-                background-color: #f9f9f9;
+                border-radius: 8px;
+                background: #fafafa;
             }
-            .hit-label {
-                display: block;
-                padding: 3px 6px;
-                margin-bottom: 2px;
-                border-radius: 4px;
-                color: #fff;
-                font-size: 13px;
+            .cat-header {
+                font-weight: 600;
+                margin: 8px 0 4px 0;
+            }
+            .pill {
+                display: inline-block;
+                padding: 4px 6px;
+                border-radius: 6px;
+                margin: 2px 0;
+                font-size: 0.9rem;
+                background: rgba(0,0,0,0.04);
             }
             </style>
             """,
             unsafe_allow_html=True,
         )
 
+        # select/deselect all found phrases (default = all selected after a scan)
+        all_checked_now = st.checkbox(
+            "Select / Deselect All Found Phrases",
+            value=len(selected_hit_ids) == len(hits),
+            key="select_all_found",
+        )
+        if all_checked_now:
+            selected_hit_ids.update(range(len(hits)))
+        else:
+            selected_hit_ids.clear()
+
+        # render grouped
         st.markdown("<div class='scroll-box'>", unsafe_allow_html=True)
+        grouped: Dict[str, List[int]] = {}
+        for idx, h in enumerate(hits):
+            grouped.setdefault(h.category, []).append(idx)
 
-        for hit in hits:
-            color = CATEGORY_COLORS.get(hit.category, "#666666")
-            checked = hit.id in selected_hit_ids
-            label_html = f"<span class='hit-label' style='background-color:{color}'>{hit.category}: {hit.text} (p{hit.page+1})</span>"
-            if st.checkbox(label_html, value=checked, key=f"hit_{hit.id}", help=f"{hit.category}", label_visibility="collapsed"):
-                selected_hit_ids.add(hit.id)
-            else:
-                selected_hit_ids.discard(hit.id)
-
+        for cat, idxs in grouped.items():
+            color = CATEGORY_COLORS.get(cat, "#999999")
+            label = CATEGORY_LABELS.get(cat, cat.title())
+            st.markdown(
+                f"<div class='cat-header' style='color:{color}'>{label}</div>",
+                unsafe_allow_html=True,
+            )
+            for i in idxs:
+                h = hits[i]
+                checked = i in selected_hit_ids
+                # just the phrase as label
+                if st.checkbox(f"{h.text} (p{h.page+1})" if h.page >= 0 else h.text,
+                               value=checked, key=f"hit_{i}"):
+                    selected_hit_ids.add(i)
+                else:
+                    selected_hit_ids.discard(i)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Generate preview and download
-        input_path = os.path.join(temp_dir, "input.pdf")
-        preview_pdf_path = os.path.join(temp_dir, "preview.pdf")
-        hits_to_redact = [hit for hit in hits if hit.id in selected_hit_ids]
-        redact_pdf_with_hits(input_path, hits_to_redact, preview_pdf_path, preview_mode=True)
+        # save / download
+        if st.session_state["file_bytes"]:
+            ext = st.session_state["file_ext"]
+            fname = os.path.splitext(st.session_state["file_name"])[0]
+            chosen_hits = [hits[i] for i in sorted(selected_hit_ids)]
 
-        with open(preview_pdf_path, "rb") as f:
-            st.download_button("Download PDF", f, file_name="redacted.pdf")
+            if ext == ".pdf":
+                if st.button("Download PDF"):
+                    out_bytes = save_pdf_blackfill(st.session_state["file_bytes"], chosen_hits)
+                    st.download_button(
+                        "Click to Download",
+                        data=out_bytes,
+                        file_name=f"{fname}_redacted.pdf",
+                        mime="application/pdf",
+                    )
+            elif ext == ".docx":
+                if st.button("Download DOCX"):
+                    out_bytes = save_docx_redacted(st.session_state["file_bytes"], chosen_hits)
+                    st.download_button(
+                        "Click to Download",
+                        data=out_bytes,
+                        file_name=f"{fname}_redacted.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+            elif ext == ".txt":
+                if st.button("Download TXT"):
+                    out_bytes = save_txt_redacted(st.session_state["file_bytes"], chosen_hits)
+                    st.download_button(
+                        "Click to Download",
+                        data=out_bytes,
+                        file_name=f"{fname}_redacted.txt",
+                        mime="text/plain",
+                    )
+            elif ext == ".xlsx":
+                if st.button("Download XLSX"):
+                    out_bytes = save_xlsx_redacted(st.session_state["file_bytes"], chosen_hits)
+                    st.download_button(
+                        "Click to Download",
+                        data=out_bytes,
+                        file_name=f"{fname}_redacted.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
 
-    with right_col:
-        st.markdown("### Preview")
-        with open(preview_pdf_path, "rb") as f:
-            pdf_bytes = f.read()
-        b64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
-        st.markdown(
-            f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="500px"></iframe>',
-            unsafe_allow_html=True,
-        )
+    with right:
+        st.subheader("Preview")
+        preview_bytes = b""
+        ext = st.session_state["file_ext"]
+
+        chosen_hits = [hits[i] for i in sorted(selected_hit_ids)]
+        if ext == ".pdf":
+            preview_bytes = build_pdf_preview(st.session_state["file_bytes"], chosen_hits)
+            if preview_bytes:
+                b64 = base64.b64encode(preview_bytes).decode("utf-8")
+                components.html(
+                    f"""
+                    <object data="data:application/pdf;base64,{b64}" type="application/pdf" width="100%" height="600px">
+                        <embed src="data:application/pdf;base64,{b64}" width="100%" height="600px"/>
+                    </object>
+                    """,
+                    height=620,
+                )
+        elif ext in (".docx", ".txt", ".xlsx"):
+            # simple HTML preview with colored highlights
+            # We re-extract a highlighted HTML for preview
+            from utilities.extract_text import build_html_preview
+            html = build_html_preview(st.session_state["file_bytes"], ext, chosen_hits)
+            components.html(
+                f'<div style="height:600px; overflow:auto; border:1px solid #ddd; border-radius:8px; padding:12px;">{html}</div>',
+                height=620,
+            )
