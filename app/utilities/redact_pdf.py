@@ -4,7 +4,7 @@ from typing import List, Tuple, Dict
 import fitz  # PyMuPDF
 from PIL import Image, ImageDraw
 
-from .extract_text import Hit, CATEGORY_COLORS
+from utilities.extract_text import Hit, CATEGORY_COLORS
 
 # ---------- Preview (colored translucent overlays) ----------
 def make_preview_pdf_with_colored_overlays(pdf_bytes: bytes, hits: List[Hit]) -> bytes:
