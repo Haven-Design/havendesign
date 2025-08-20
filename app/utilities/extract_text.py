@@ -1,12 +1,13 @@
 import re
 import fitz
+import docx
 from typing import List
 
 class Hit:
-    def __init__(self, page: int, text: str, rect, category: str):
+    def __init__(self, page, rect, text, category):
         self.page = page
-        self.text = text
         self.rect = rect
+        self.text = text
         self.category = category
 
 CATEGORY_LABELS = {
@@ -20,31 +21,61 @@ CATEGORY_LABELS = {
 }
 
 CATEGORY_PATTERNS = {
-    "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
-    "phone": r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
+    "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+    "phone": r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}\b",
     "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
     "credit_card": r"\b(?:\d[ -]*?){13,16}\b",
-    "drivers_license": r"\b[A-Z]\d{6,8}\b",
-    "name": r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)*)\b"
+    "drivers_license": r"\b[A-Z0-9]{5,12}\b",
+    "name": r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b",
 }
 
-def extract_text_and_positions(input_path, params, custom_phrase="") -> List[Hit]:
+CATEGORY_COLORS = {
+    "email": "#FFA07A",
+    "phone": "#87CEEB",
+    "ssn": "#FFD700",
+    "credit_card": "#FF69B4",
+    "drivers_license": "#ADFF2F",
+    "name": "#9370DB",
+    "custom": "#D3D3D3"
+}
+
+def extract_text_and_positions(file_bytes, ext, params, custom_phrase):
     hits: List[Hit] = []
-    doc = fitz.open(input_path)
 
-    for page_num, page in enumerate(doc):
-        blocks = page.get_text("blocks")
-        for b in blocks:
-            text = b[4]
-            rect = fitz.Rect(b[:4])
+    if ext == ".pdf":
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        for page_num, page in enumerate(doc):
+            text_instances = page.get_text("blocks")
+            for block in text_instances:
+                text = block[4]
+                for category, pattern in CATEGORY_PATTERNS.items():
+                    if params.get(category, False):
+                        for match in re.finditer(pattern, text):
+                            hits.append(Hit(page_num, block[:4], match.group(), category))
+                if params.get("custom", False) and custom_phrase:
+                    for match in re.finditer(re.escape(custom_phrase), text, flags=re.IGNORECASE):
+                        hits.append(Hit(page_num, block[:4], match.group(), "custom"))
 
+    elif ext == ".docx":
+        doc = docx.Document(io.BytesIO(file_bytes))
+        for para in doc.paragraphs:
+            text = para.text
             for category, pattern in CATEGORY_PATTERNS.items():
                 if params.get(category, False):
-                    for m in re.finditer(pattern, text):
-                        hits.append(Hit(page_num, m.group(), rect, category))
+                    for match in re.finditer(pattern, text):
+                        hits.append(Hit(0, None, match.group(), category))
+            if params.get("custom", False) and custom_phrase:
+                for match in re.finditer(re.escape(custom_phrase), text, flags=re.IGNORECASE):
+                    hits.append(Hit(0, None, match.group(), "custom"))
 
-            if custom_phrase and params.get("custom", False):
-                if custom_phrase in text:
-                    hits.append(Hit(page_num, custom_phrase, rect, "custom"))
+    elif ext == ".txt":
+        text = file_bytes.decode("utf-8")
+        for category, pattern in CATEGORY_PATTERNS.items():
+            if params.get(category, False):
+                for match in re.finditer(pattern, text):
+                    hits.append(Hit(0, None, match.group(), category))
+        if params.get("custom", False) and custom_phrase:
+            for match in re.finditer(re.escape(custom_phrase), text, flags=re.IGNORECASE):
+                hits.append(Hit(0, None, match.group(), "custom"))
 
     return hits
