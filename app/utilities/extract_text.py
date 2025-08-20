@@ -1,6 +1,7 @@
 import re
 import fitz
 import docx
+import io
 from typing import List
 
 class Hit:
@@ -45,14 +46,14 @@ def extract_text_and_positions(file_bytes, ext, params, custom_phrase):
     if ext == ".pdf":
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         for page_num, page in enumerate(doc):
-            text_instances = page.get_text("blocks")
-            for block in text_instances:
+            blocks = page.get_text("blocks")
+            for block in blocks:
                 text = block[4]
                 for category, pattern in CATEGORY_PATTERNS.items():
                     if params.get(category, False):
                         for match in re.finditer(pattern, text):
                             hits.append(Hit(page_num, block[:4], match.group(), category))
-                if params.get("custom", False) and custom_phrase:
+                if custom_phrase:
                     for match in re.finditer(re.escape(custom_phrase), text, flags=re.IGNORECASE):
                         hits.append(Hit(page_num, block[:4], match.group(), "custom"))
 
@@ -64,7 +65,7 @@ def extract_text_and_positions(file_bytes, ext, params, custom_phrase):
                 if params.get(category, False):
                     for match in re.finditer(pattern, text):
                         hits.append(Hit(0, None, match.group(), category))
-            if params.get("custom", False) and custom_phrase:
+            if custom_phrase:
                 for match in re.finditer(re.escape(custom_phrase), text, flags=re.IGNORECASE):
                     hits.append(Hit(0, None, match.group(), "custom"))
 
@@ -74,7 +75,7 @@ def extract_text_and_positions(file_bytes, ext, params, custom_phrase):
             if params.get(category, False):
                 for match in re.finditer(pattern, text):
                     hits.append(Hit(0, None, match.group(), category))
-        if params.get("custom", False) and custom_phrase:
+        if custom_phrase:
             for match in re.finditer(re.escape(custom_phrase), text, flags=re.IGNORECASE):
                 hits.append(Hit(0, None, match.group(), "custom"))
 
