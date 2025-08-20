@@ -1,7 +1,7 @@
 import io
 import fitz  # PyMuPDF
 from typing import List
-from .extract_text import Hit, CATEGORY_COLORS
+from utilities.extract_text import Hit, CATEGORY_COLORS
 
 def make_preview_pdf_with_colored_overlays(file_bytes: bytes, hits: List[Hit]) -> bytes:
     doc = fitz.open("pdf", file_bytes)
