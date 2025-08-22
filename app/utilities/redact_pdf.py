@@ -39,8 +39,8 @@ def redact_pdf_with_hits(input_path: str, hits: List[Hit], output_path: Optional
             for h in page_hits:
                 for rect in h.rects:
                     r = fitz.Rect(rect)
-                    page.add_redact_annot(r, fill=(0, 0, 0))
-            # Apply once per page
+                    page.add_redact_annot(r, fill=(1, 1, 1))  # white fill (common expectation)
+            # Apply once per page (limiting scope to annotations just added)
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
 
     out = io.BytesIO()
@@ -60,7 +60,6 @@ def save_masked_file(file_bytes: bytes, ext: str, hits: List[Hit]) -> bytes:
     """
     if ext == ".txt":
         text = file_bytes.decode("utf-8", errors="ignore")
-        # Replace longer strings first to avoid partial overlaps
         for h in sorted(hits, key=lambda x: len(x.text), reverse=True):
             text = text.replace(h.text, "█" * len(h.text))
         return text.encode("utf-8")

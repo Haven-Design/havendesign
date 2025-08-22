@@ -1,6 +1,7 @@
 import re
 import io
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, DefaultDict
+from collections import defaultdict
 
 import fitz  # PyMuPDF
 import docx  # python-docx
@@ -128,16 +129,27 @@ def aba_routing_valid(num: str) -> bool:
 def _page_hits_from_text(page, page_text: str, params, custom_phrase: Optional[str]) -> List[Hit]:
     hits: List[Hit] = []
 
+    # Cache rectangles per exact matched text and use an occurrence counter
+    rect_cache: Dict[str, List] = {}
+    occ_index: DefaultDict[str, int] = defaultdict(int)
+
+    def rects_for_exact(txt: str) -> List[Tuple[float, float, float, float]]:
+        # Cache + use quads for tighter boxes; map one occurrence per match
+        if txt not in rect_cache:
+            rect_cache[txt] = page.search_for(txt, quads=True) or []
+        idx = occ_index[txt]
+        occ_index[txt] += 1
+        rects = []
+        if idx < len(rect_cache[txt]):
+            q = rect_cache[txt][idx]
+            r = getattr(q, "rect", q)  # Quad.rect or Rect
+            rects.append((r.x0, r.y0, r.x1, r.y1))
+        return rects
+
     def add_match(cat: str, m: re.Match):
         txt = m.group(0)
         start, end = m.start(), m.end()
-        rects = []
-        try:
-            found = page.search_for(txt, quads=False)
-            for r in found:
-                rects.append((r.x0, r.y0, r.x1, r.y1))
-        except Exception:
-            rects = []
+        rects = rects_for_exact(txt)
         hits.append(Hit(page.number, rects, txt, cat, start, end))
 
     for cat, pattern in CATEGORY_PATTERNS.items():
