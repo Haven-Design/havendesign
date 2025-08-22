@@ -39,9 +39,9 @@ CATEGORY_LABELS = {
     "name": "Names",
     "ip_address": "IP Addresses",
     "bank_account": "Bank Account Numbers",
-    "vin": "VIN Numbers",
     "routing_number": "US Routing Numbers",
     "iban": "IBANs",
+    "vin": "VIN Numbers",
     "custom": "Custom Phrases",
 }
 
@@ -64,7 +64,6 @@ CATEGORY_COLORS = {
 
 # -----------------------
 # Regex patterns
-# (balanced for practicality over perfection)
 # -----------------------
 CATEGORY_PATTERNS = {
     "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
@@ -72,28 +71,31 @@ CATEGORY_PATTERNS = {
     "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
     # Credit card candidates: 13–19 digits with spaces/dashes; Luhn check applied afterward
     "credit_card": r"\b(?:\d[ -]?){13,19}\b",
-    # Generic US driver's license (very loose, state-specific formats vary)
+    # Generic US driver's license (loose, state-specific formats vary)
     "drivers_license": r"\b[A-Z0-9]{5,12}\b",
-    # Dates (MM/DD/YYYY, YYYY-MM-DD, Month Day, Year)
-    "date": r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s*\d{4}|(?:\d{4})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b",
-    # Simple US street address: number + street + suffix
+    # Dates:  MM/DD/YYYY, YYYY-MM-DD, or Month Day, Year
+    "date": r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
+            r"|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s*\d{4}"
+            r"|\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b",
+    # Simple US street address
     "address": r"\b\d{1,6}\s+[0-9A-Za-z.'\-]+\s+(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Ln|Lane|Dr|Drive|Ct|Court|Pl|Place|Terrace|Way)\b\.?",
-    # Capitalized First Last (optional middle), very heuristic
+    # Capitalized First Last (optional middle)
     "name": r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b",
-    # IPv4 and simplified IPv6
-    "ip_address": r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?!$)|$)){4}\b|\\b(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9]{0,4}\\b",
-    # Bank account numbers (heuristic): 8–14 digits near keywords
-    "bank_account": r"(?:(?i)(?:account|acct|checking|savings)\D{0,20})(\d{8,14})",
-    # US ABA routing (9 digits) — checksum applied afterward
+    # IPv4 and IPv6
+    "ip_address": r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?!$)|$)){4}\b"
+                  r"|\b(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9]{0,4}\b",
+    # Bank account: 8–14 digits after common keywords (case-insensitive handled in flags)
+    "bank_account": r"(?:account|acct|checking|savings)\D{0,20}(\d{8,14})",
+    # US ABA routing: exactly 9 digits
     "routing_number": r"\b\d{9}\b",
-    # IBAN (very rough)
+    # IBAN
     "iban": r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b",
     # VIN: 17 chars excluding I, O, Q
     "vin": r"\b(?!.*[IOQ])[A-HJ-NPR-Z0-9]{17}\b",
 }
 
 # -----------------------
-# Validators to reduce false positives
+# Validators
 # -----------------------
 def luhn_valid(num: str) -> bool:
     digits = [int(d) for d in re.sub(r"\D", "", num)]
@@ -126,7 +128,6 @@ def aba_routing_valid(num: str) -> bool:
 def _page_hits_from_text(page, page_text: str, params, custom_phrase: Optional[str]) -> List[Hit]:
     hits: List[Hit] = []
 
-    # Helper to add a match with rects via search_for
     def add_match(cat: str, m: re.Match):
         txt = m.group(0)
         start, end = m.start(), m.end()
@@ -140,43 +141,29 @@ def _page_hits_from_text(page, page_text: str, params, custom_phrase: Optional[s
             rect = None
         hits.append(Hit(page.number, rect, txt, cat, start, end))
 
-    # Iterate categories
     for cat, pattern in CATEGORY_PATTERNS.items():
         if not params.get(cat, False):
             continue
         flags = re.IGNORECASE if cat in ("address", "iban", "bank_account") else 0
         for m in re.finditer(pattern, page_text, flags=flags):
-            # Post-filters
             if cat == "credit_card" and not luhn_valid(m.group(0)):
                 continue
             if cat == "routing_number" and not aba_routing_valid(m.group(0)):
                 continue
             add_match(cat, m)
 
-    # Custom phrase
     if custom_phrase:
         for m in re.finditer(re.escape(custom_phrase), page_text, flags=re.IGNORECASE):
             add_match("custom", m)
 
-    # Remove overlapping duplicates preferring more specific categories
-    # (priority order below, earlier wins)
+    # Remove overlaps (priority by category)
     priority = [
-        "credit_card",
-        "ssn",
-        "routing_number",
-        "iban",
-        "bank_account",
-        "drivers_license",
-        "ip_address",
-        "date",
-        "address",
-        "vin",
-        "email",
-        "phone",
-        "name",
-        "custom",
+        "credit_card", "ssn", "routing_number", "iban", "bank_account",
+        "drivers_license", "ip_address", "date", "address",
+        "vin", "email", "phone", "name", "custom"
     ]
-    hits.sort(key=lambda h: (h.start if h.start is not None else -1, priority.index(h.category) if h.category in priority else 999))
+    hits.sort(key=lambda h: (h.start if h.start is not None else -1,
+                             priority.index(h.category) if h.category in priority else 999))
 
     filtered: List[Hit] = []
     last_spans: List[Tuple[int, int]] = []
