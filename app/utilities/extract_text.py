@@ -12,14 +12,14 @@ class Hit:
     def __init__(
         self,
         page: int,
-        rect: Optional[Tuple[float, float, float, float]],
+        rects: Optional[List[Tuple[float, float, float, float]]],
         text: str,
         category: str,
         start: Optional[int] = None,
         end: Optional[int] = None,
     ):
         self.page = page
-        self.rect = rect
+        self.rects = rects or []
         self.text = text
         self.category = category
         self.start = start
@@ -84,7 +84,7 @@ CATEGORY_PATTERNS = {
     # IPv4 and IPv6
     "ip_address": r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?!$)|$)){4}\b"
                   r"|\b(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9]{0,4}\b",
-    # Bank account: 8–14 digits after common keywords (case-insensitive handled in flags)
+    # Bank account: 8–14 digits after common keywords (case-insensitive handled via flags)
     "bank_account": r"(?:account|acct|checking|savings)\D{0,20}(\d{8,14})",
     # US ABA routing: exactly 9 digits
     "routing_number": r"\b\d{9}\b",
@@ -123,7 +123,7 @@ def aba_routing_valid(num: str) -> bool:
     return checksum == 0
 
 # -----------------------
-# Core extractor
+# Core extractor (PDF page-level helper)
 # -----------------------
 def _page_hits_from_text(page, page_text: str, params, custom_phrase: Optional[str]) -> List[Hit]:
     hits: List[Hit] = []
@@ -131,15 +131,14 @@ def _page_hits_from_text(page, page_text: str, params, custom_phrase: Optional[s
     def add_match(cat: str, m: re.Match):
         txt = m.group(0)
         start, end = m.start(), m.end()
-        rect = None
+        rects = []
         try:
-            rects = page.search_for(txt, quads=False)
-            if rects:
-                r = rects[0]
-                rect = (r.x0, r.y0, r.x1, r.y1)
+            found = page.search_for(txt, quads=False)
+            for r in found:
+                rects.append((r.x0, r.y0, r.x1, r.y1))
         except Exception:
-            rect = None
-        hits.append(Hit(page.number, rect, txt, cat, start, end))
+            rects = []
+        hits.append(Hit(page.number, rects, txt, cat, start, end))
 
     for cat, pattern in CATEGORY_PATTERNS.items():
         if not params.get(cat, False):
@@ -156,7 +155,7 @@ def _page_hits_from_text(page, page_text: str, params, custom_phrase: Optional[s
         for m in re.finditer(re.escape(custom_phrase), page_text, flags=re.IGNORECASE):
             add_match("custom", m)
 
-    # Remove overlaps (priority by category)
+    # Remove overlapping (by character spans) to reduce duplicate category collisions
     priority = [
         "credit_card", "ssn", "routing_number", "iban", "bank_account",
         "drivers_license", "ip_address", "date", "address",
@@ -177,6 +176,9 @@ def _page_hits_from_text(page, page_text: str, params, custom_phrase: Optional[s
             last_spans.append((h.start, h.end))
     return filtered
 
+# -----------------------
+# Public API
+# -----------------------
 def extract_text_and_positions(file_bytes, ext, params, custom_phrase: Optional[str]) -> List[Hit]:
     hits: List[Hit] = []
 
@@ -199,10 +201,10 @@ def extract_text_and_positions(file_bytes, ext, params, custom_phrase: Optional[
                     continue
                 if cat == "routing_number" and not aba_routing_valid(m.group(0)):
                     continue
-                hits.append(Hit(0, None, m.group(0), cat))
+                hits.append(Hit(0, [], m.group(0), cat))
         if custom_phrase:
             for m in re.finditer(re.escape(custom_phrase), combined, flags=re.IGNORECASE):
-                hits.append(Hit(0, None, m.group(0), "custom"))
+                hits.append(Hit(0, [], m.group(0), "custom"))
 
     elif ext == ".txt":
         text = file_bytes.decode("utf-8", errors="ignore")
@@ -215,9 +217,9 @@ def extract_text_and_positions(file_bytes, ext, params, custom_phrase: Optional[
                     continue
                 if cat == "routing_number" and not aba_routing_valid(m.group(0)):
                     continue
-                hits.append(Hit(0, None, m.group(0), cat))
+                hits.append(Hit(0, [], m.group(0), cat))
         if custom_phrase:
             for m in re.finditer(re.escape(custom_phrase), text, flags=re.IGNORECASE):
-                hits.append(Hit(0, None, m.group(0), "custom"))
+                hits.append(Hit(0, [], m.group(0), "custom"))
 
     return hits

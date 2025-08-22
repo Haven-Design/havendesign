@@ -1,47 +1,54 @@
 import io
 from collections import defaultdict
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import fitz  # PyMuPDF
 
 from utilities.extract_text import Hit, CATEGORY_COLORS
 
+def _hex_to_rgb01(color_hex: str) -> Tuple[float, float, float]:
+    color_hex = color_hex.lstrip("#")
+    return tuple(int(color_hex[i:i+2], 16) / 255 for i in (0, 2, 4))  # type: ignore
+
 def redact_pdf_with_hits(input_path: str, hits: List[Hit], output_path: Optional[str] = None, preview_mode: bool = True) -> bytes:
     """
-    If preview_mode=True, draws semi-transparent colored boxes (no permanent redaction).
-    If preview_mode=False, applies black redaction boxes permanently.
+    If preview_mode=True: draw semi-transparent colored boxes (non-destructive).
+    If preview_mode=False: add redaction annots for the exact rectangles and apply.
     """
     doc = fitz.open(input_path)
 
-    # Group hits by page for more efficient apply_redactions
+    # Group by page for efficiency
     hits_by_page = defaultdict(list)
     for h in hits:
-        if h.rect is None:
+        if not h.rects:
             continue
         hits_by_page[h.page].append(h)
 
     for page_num, page_hits in hits_by_page.items():
         page = doc[page_num]
+
         if preview_mode:
             for h in page_hits:
                 color_hex = CATEGORY_COLORS.get(h.category, "#000000")
-                rgb = tuple(int(color_hex.lstrip("#")[i:i+2], 16)/255 for i in (0, 2, 4))
-                rect = fitz.Rect(h.rect)
-                page.draw_rect(rect, color=rgb, fill=(*rgb, 0.2), width=1)
+                rgb = _hex_to_rgb01(color_hex)
+                for rect in h.rects:
+                    r = fitz.Rect(rect)
+                    page.draw_rect(r, color=rgb, fill=(*rgb, 0.22), width=1)
         else:
-            # Add redaction annots first, then apply once
+            # Add redact annots for each rectangle tied to each selected hit
             for h in page_hits:
-                rect = fitz.Rect(h.rect)
-                page.add_redact_annot(rect, fill=(0, 0, 0))
+                for rect in h.rects:
+                    r = fitz.Rect(rect)
+                    page.add_redact_annot(r, fill=(0, 0, 0))
+            # Apply once per page
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
 
     out = io.BytesIO()
-    # Incremental save disabled to ensure preview marks persist
     doc.save(out, incremental=False)
     doc.close()
 
     data = out.getvalue()
-    if output_path and preview_mode:
+    if output_path:
         with open(output_path, "wb") as f:
             f.write(data)
     return data
@@ -53,6 +60,7 @@ def save_masked_file(file_bytes: bytes, ext: str, hits: List[Hit]) -> bytes:
     """
     if ext == ".txt":
         text = file_bytes.decode("utf-8", errors="ignore")
+        # Replace longer strings first to avoid partial overlaps
         for h in sorted(hits, key=lambda x: len(x.text), reverse=True):
             text = text.replace(h.text, "█" * len(h.text))
         return text.encode("utf-8")
@@ -62,7 +70,6 @@ def save_masked_file(file_bytes: bytes, ext: str, hits: List[Hit]) -> bytes:
         import io as sysio
 
         doc = Document(io.BytesIO(file_bytes))
-        # naive run-level replacement
         for para in doc.paragraphs:
             if not para.text:
                 continue
@@ -71,7 +78,6 @@ def save_masked_file(file_bytes: bytes, ext: str, hits: List[Hit]) -> bytes:
                 if h.text in new_text:
                     new_text = new_text.replace(h.text, "█" * len(h.text))
             if new_text != para.text:
-                # replace runs wholesale to preserve basic structure
                 for r in para.runs:
                     r.text = ""
                 para.add_run(new_text)
@@ -80,5 +86,5 @@ def save_masked_file(file_bytes: bytes, ext: str, hits: List[Hit]) -> bytes:
         doc.save(output)
         return output.getvalue()
 
-    # Fallback: unchanged
+    # Fallback
     return file_bytes

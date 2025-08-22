@@ -5,6 +5,7 @@ import tempfile
 from typing import List, Dict, Set, Tuple
 
 import streamlit as st
+import pandas as pd
 
 from utilities.extract_text import (
     extract_text_and_positions,
@@ -38,6 +39,8 @@ if "id_to_hit" not in st.session_state:
     st.session_state.id_to_hit: Dict[int, Hit] = {}
 if "selected_hit_ids" not in st.session_state:
     st.session_state.selected_hit_ids: Set[int] = set()
+if "phrases_df" not in st.session_state:
+    st.session_state.phrases_df = pd.DataFrame()
 
 # -----------------------
 # Upload
@@ -90,6 +93,8 @@ if st.session_state.file_bytes:
             st.session_state.params,
             custom_phrase,
         )
+
+        # Deduplicate conservatively by (page, start, end, category, text) where available
         uniq: Dict[Tuple, Hit] = {}
         for h in hits:
             key = (
@@ -99,7 +104,7 @@ if st.session_state.file_bytes:
                 h.category,
                 h.text,
             )
-            if key[1] is None:  # no offsets for DOCX/TXT
+            if key[1] is None:
                 key = (h.page, h.text, h.category)
             uniq[key] = h
 
@@ -107,51 +112,76 @@ if st.session_state.file_bytes:
         st.session_state.id_to_hit = {i: h for i, h in enumerate(st.session_state.hits)}
         st.session_state.selected_hit_ids = set(st.session_state.id_to_hit.keys())
 
+        # Build a scrollable, editable table (data_editor) for robust selection control
+        rows = []
+        for i, h in st.session_state.id_to_hit.items():
+            rows.append(
+                {
+                    "id": i,
+                    "keep": True,
+                    "page": (h.page + 1) if h.page is not None else 1,
+                    "category": CATEGORY_LABELS.get(h.category, h.category),
+                    "text": h.text,
+                }
+            )
+        st.session_state.phrases_df = pd.DataFrame(rows)
+
 # -----------------------
 # Results & Preview
 # -----------------------
-if st.session_state.hits:
+if len(st.session_state.hits) > 0:
     left, right = st.columns([1, 1])
 
     with left:
         st.markdown("### Redacted Phrases")
-        st.caption("Uncheck any phrase to exclude it from the preview and download.")
 
-        if st.button("Deselect All Phrases"):
-            for i in st.session_state.id_to_hit.keys():
-                st.session_state[f"hit_{i}"] = False
-            st.session_state.selected_hit_ids.clear()
-            st.rerun()
+        # Legend to match preview colors
+        with st.expander("Category legend", expanded=False):
+            legend_cols = st.columns(3)
+            items = list(CATEGORY_COLORS.items())
+            for idx, (k, col) in enumerate(items):
+                with legend_cols[idx % 3]:
+                    st.markdown(
+                        f"<div style='display:inline-block;width:12px;height:12px;background:{col};border-radius:3px;margin-right:6px;vertical-align:middle;'></div>"
+                        f"<span style='vertical-align:middle;'>{CATEGORY_LABELS.get(k, k)}</span>",
+                        unsafe_allow_html=True,
+                    )
 
-        # Scrollable container
-        st.markdown(
-            """
-            <style>
-            .scrollbox {max-height: 360px; overflow-y: auto; border: 1px solid #ddd;
-                        padding: 8px; border-radius: 8px; background: #fafafa;}
-            .pill {display:inline-block; padding:2px 6px; border-radius:999px;
-                   font-size:12px; margin-right:6px;}
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.markdown("<div class='scrollbox'>", unsafe_allow_html=True)
+        btn_cols = st.columns(3)
+        with btn_cols[0]:
+            if st.button("Select All Phrases"):
+                if not st.session_state.phrases_df.empty:
+                    st.session_state.phrases_df["keep"] = True
+        with btn_cols[1]:
+            if st.button("Deselect All Phrases"):
+                if not st.session_state.phrases_df.empty:
+                    st.session_state.phrases_df["keep"] = False
+        with btn_cols[2]:
+            st.caption("Tip: toggle rows in the table below.")
 
-        new_selected_ids = set()
-        for i, h in st.session_state.id_to_hit.items():
-            color = CATEGORY_COLORS.get(h.category, "#cccccc")
-            pill = f"<span class='pill' style='background:{color}33;border:1px solid {color};'>{h.category}</span>"
-            st.markdown(pill, unsafe_allow_html=True)
-            checked = st.checkbox(
-                f"[p{(h.page + 1) if h.page is not None else 1}] {h.text}",
-                key=f"hit_{i}",
-                value=(i in st.session_state.selected_hit_ids),
+        # Editable, scrollable selection table
+        if not st.session_state.phrases_df.empty:
+            edited = st.data_editor(
+                st.session_state.phrases_df,
+                num_rows="fixed",
+                use_container_width=True,
+                height=380,
+                hide_index=True,
+                column_config={
+                    "keep": st.column_config.CheckboxColumn("keep"),
+                    "page": st.column_config.NumberColumn("page", format="%d"),
+                    "category": st.column_config.TextColumn("category"),
+                    "text": st.column_config.TextColumn("text"),
+                    "id": st.column_config.NumberColumn("id", help="internal id", width="small"),
+                },
             )
-            if checked:
-                new_selected_ids.add(i)
-
-        st.markdown("</div>", unsafe_allow_html=True)
-        st.session_state.selected_hit_ids = new_selected_ids
+            # Persist changes and rebuild selected ids from the table state
+            st.session_state.phrases_df = edited.copy()
+            st.session_state.selected_hit_ids = set(
+                edited.loc[edited["keep"] == True, "id"].astype(int).tolist()
+            )
+        else:
+            st.info("No phrases found with the current selection.")
 
         # Download
         selected_hits = [st.session_state.id_to_hit[i] for i in sorted(st.session_state.selected_hit_ids)]
@@ -187,6 +217,7 @@ if st.session_state.hits:
     with right:
         st.markdown("### Preview")
         selected_hits = [st.session_state.id_to_hit[i] for i in sorted(st.session_state.selected_hit_ids)]
+
         if st.session_state.ext == ".pdf" and st.session_state.input_pdf_path:
             if selected_hits:
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
