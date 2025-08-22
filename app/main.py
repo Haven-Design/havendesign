@@ -30,7 +30,6 @@ if "input_pdf_path" not in st.session_state:
     st.session_state.input_pdf_path: str | None = None
 
 if "params" not in st.session_state:
-    # all categories default to False
     st.session_state.params: Dict[str, bool] = {k: False for k in CATEGORY_LABELS.keys()}
 
 if "hits" not in st.session_state:
@@ -62,7 +61,6 @@ if uploaded_file:
 if st.session_state.file_bytes:
     st.subheader("Select Categories to Redact")
 
-    # Select All button — set first, then trigger a rerun so checkboxes show as checked immediately
     if st.button("Select All Categories"):
         for k in st.session_state.params.keys():
             st.session_state.params[k] = True
@@ -92,7 +90,6 @@ if st.session_state.file_bytes:
             st.session_state.params,
             custom_phrase,
         )
-        # Deduplicate by (page, start, end, category, text) when available; fall back to (page, text, category)
         uniq: Dict[Tuple, Hit] = {}
         for h in hits:
             key = (
@@ -121,42 +118,43 @@ if st.session_state.hits:
         st.caption("Uncheck any phrase to exclude it from the preview and download.")
 
         if st.button("Deselect All Phrases"):
+            for i in st.session_state.id_to_hit.keys():
+                st.session_state[f"hit_{i}"] = False
             st.session_state.selected_hit_ids.clear()
+            st.rerun()
 
-        # Scrollable list of phrases with real Streamlit checkboxes (so they sync state)
-        # We'll group by category for color-coding badges
+        # Scrollable container
         st.markdown(
             """
             <style>
-            .scrollbox {max-height: 360px; overflow-y: auto; border: 1px solid #ddd; padding: 8px; border-radius: 8px; background: #fafafa;}
-            .pill {display:inline-block; padding:2px 6px; border-radius:999px; font-size:12px; margin-right:6px;}
+            .scrollbox {max-height: 360px; overflow-y: auto; border: 1px solid #ddd;
+                        padding: 8px; border-radius: 8px; background: #fafafa;}
+            .pill {display:inline-block; padding:2px 6px; border-radius:999px;
+                   font-size:12px; margin-right:6px;}
             </style>
             """,
             unsafe_allow_html=True,
         )
-        with st.container():
-            st.markdown("<div class='scrollbox'>", unsafe_allow_html=True)
-            for i, h in st.session_state.id_to_hit.items():
-                color = CATEGORY_COLORS.get(h.category, "#cccccc")
-                pill = f"<span class='pill' style='background:{color}33;border:1px solid {color};'>{h.category}</span>"
-                label_html = f"{pill} [p{(h.page + 1) if h.page is not None else 1}] {h.text}"
-                # Use checkbox per-hit; toggling updates selection immediately
-                checked = i in st.session_state.selected_hit_ids
-                new_val = st.checkbox(
-                    label=label_html,
-                    value=checked,
-                    key=f"hit_{i}",
-                    help=f"{CATEGORY_LABELS.get(h.category, h.category)}",
-                )
-                if new_val:
-                    st.session_state.selected_hit_ids.add(i)
-                else:
-                    st.session_state.selected_hit_ids.discard(i)
-            st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("<div class='scrollbox'>", unsafe_allow_html=True)
 
-        # Download buttons under list
+        new_selected_ids = set()
+        for i, h in st.session_state.id_to_hit.items():
+            color = CATEGORY_COLORS.get(h.category, "#cccccc")
+            pill = f"<span class='pill' style='background:{color}33;border:1px solid {color};'>{h.category}</span>"
+            st.markdown(pill, unsafe_allow_html=True)
+            checked = st.checkbox(
+                f"[p{(h.page + 1) if h.page is not None else 1}] {h.text}",
+                key=f"hit_{i}",
+                value=(i in st.session_state.selected_hit_ids),
+            )
+            if checked:
+                new_selected_ids.add(i)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.session_state.selected_hit_ids = new_selected_ids
+
+        # Download
         selected_hits = [st.session_state.id_to_hit[i] for i in sorted(st.session_state.selected_hit_ids)]
-
         st.markdown("### Download")
         if st.session_state.ext == ".pdf":
             if st.session_state.input_pdf_path and selected_hits:
@@ -188,8 +186,8 @@ if st.session_state.hits:
 
     with right:
         st.markdown("### Preview")
+        selected_hits = [st.session_state.id_to_hit[i] for i in sorted(st.session_state.selected_hit_ids)]
         if st.session_state.ext == ".pdf" and st.session_state.input_pdf_path:
-            # live PDF preview
             if selected_hits:
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                     preview_path = tmp.name
@@ -208,7 +206,6 @@ if st.session_state.hits:
             else:
                 st.info("No phrases selected.")
         else:
-            # For DOCX/TXT, show a masked text preview
             if st.session_state.file_bytes and selected_hits:
                 masked = save_masked_file(
                     st.session_state.file_bytes, st.session_state.ext, selected_hits
