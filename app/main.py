@@ -1,5 +1,4 @@
 import os
-import io
 import base64
 from typing import List, Set, Dict
 
@@ -49,17 +48,23 @@ if uploaded_file:
 # -----------------------
 st.subheader("Select Redaction Parameters")
 
+# checkboxes
 params: Dict[str, bool] = {}
 cols = st.columns(2)
 for i, (key, label) in enumerate(CATEGORY_LABELS.items()):
+    if f"param_{key}" not in st.session_state:
+        st.session_state[f"param_{key}"] = False
     with cols[i % 2]:
-        params[key] = st.checkbox(label, value=False)
+        params[key] = st.checkbox(label, key=f"param_{key}")
 
-# Select All button
-if st.button("Select All Parameters"):
+# select all button
+def _select_all():
     for key in CATEGORY_LABELS.keys():
-        params[key] = True
+        st.session_state[f"param_{key}"] = True
 
+st.button("Select All Parameters", on_click=_select_all)
+
+# custom phrase
 custom_phrase = st.text_input(
     "Add a custom phrase to redact",
     placeholder="Type phrase and press Enter"
@@ -73,7 +78,6 @@ else:
 # Scan
 # -----------------------
 if st.button("Scan for Redacted Phrases") and uploaded_file:
-    # clear old hits
     hits.clear()
     id_to_hit.clear()
     selected_hit_ids.clear()
@@ -92,10 +96,8 @@ if st.button("Scan for Redacted Phrases") and uploaded_file:
         id_to_hit[hid] = h
         selected_hit_ids.add(hid)
 
-    # always reset hit_keys so scroll bar has entries
     st.session_state.hit_keys = list(id_to_hit.keys())
 
-    # scroll UI down to results
     components.html(
         """
         <script>
@@ -118,64 +120,48 @@ if hits:
         st.markdown("<div id='results-section'></div>", unsafe_allow_html=True)
         st.markdown("### Redacted Phrases")
 
-        with st.container():
-            st.markdown(
-                """
-                <style>
-                    div[data-testid="stCheckbox"] label {
-                        display: flex;
-                        align-items: center;
-                        gap: 0.4rem;
-                        padding: 0.25rem 0.5rem;
-                        border-radius: 8px;
-                        margin-bottom: 4px;
-                    }
-                </style>
-                """,
-                unsafe_allow_html=True,
+        st.markdown(
+            """
+            <style>
+                div[data-testid="stCheckbox"] label {
+                    display: flex;
+                    align-items: center;
+                    gap: 0.4rem;
+                    padding: 0.25rem 0.5rem;
+                    border-radius: 8px;
+                    margin-bottom: 4px;
+                }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        for hid in st.session_state.hit_keys:
+            h = id_to_hit[hid]
+            color = CATEGORY_COLORS.get(h.category, "#ccc")
+            pill = f"<span style='background:{color};color:#fff;padding:2px 6px;border-radius:6px;font-size:0.8em'>{h.category}</span>"
+            phrase_label = f"**{h.text}** {pill} <span style='font-size:0.8em;color:#666'>(p{h.page+1})</span>"
+
+            checked = hid in selected_hit_ids
+            if st.checkbox(phrase_label, key=f"hit_{hid}", value=checked):
+                selected_hit_ids.add(hid)
+            else:
+                selected_hit_ids.discard(hid)
+
+        # single destructive download
+        if st.session_state.file_bytes:
+            selected_hits = [id_to_hit[i] for i in selected_hit_ids]
+            final_bytes = redact_pdf_with_hits(
+                st.session_state.file_bytes,
+                selected_hits,
+                preview_mode=False,
+                black_box=True,  # force black box redaction
             )
-
-            for hid in st.session_state.hit_keys:
-                h = id_to_hit[hid]
-                color = CATEGORY_COLORS.get(h.category, "#ccc")
-                pill = f"<span style='background:{color};color:#fff;padding:2px 6px;border-radius:6px;font-size:0.8em'>{h.category}</span>"
-                phrase_label = f"{h.text} {pill} <span style='font-size:0.8em;color:#666'>(p{h.page+1})</span>"
-
-                checked = hid in selected_hit_ids
-                if st.checkbox(phrase_label, key=f"hit_{hid}", value=checked):
-                    selected_hit_ids.add(hid)
-                else:
-                    selected_hit_ids.discard(hid)
-
-        # Download buttons
-if st.session_state.file_bytes:
-    selected_hits = [id_to_hit[i] for i in selected_hit_ids]
-
-    # Traditional black box redaction
-    black_bytes = redact_pdf_with_hits(
-        st.session_state.file_bytes,
-        selected_hits,
-        preview_mode=False,
-        black_box=True,
-    )
-    st.download_button(
-        "Download Redacted PDF (Black Boxes)",
-        data=black_bytes,
-        file_name="redacted.pdf",
-    )
-
-    # Highlight-only (non-destructive)
-    highlight_bytes = redact_pdf_with_hits(
-        st.session_state.file_bytes,
-        selected_hits,
-        preview_mode=True,  # highlight instead of remove
-    )
-    st.download_button(
-        "Download Highlighted PDF (Keep Text)",
-        data=highlight_bytes,
-        file_name="highlighted.pdf",
-    )
-
+            st.download_button(
+                "Download Redacted PDF",
+                data=final_bytes,
+                file_name="redacted.pdf",
+            )
 
     with right_col:
         st.markdown("### Preview")
@@ -184,7 +170,7 @@ if st.session_state.file_bytes:
             out_bytes = redact_pdf_with_hits(
                 st.session_state.file_bytes,
                 selected_hits,
-                preview_mode=True,
+                preview_mode=True,  # colored highlight preview only
             )
 
             b64_pdf = base64.b64encode(out_bytes).decode("utf-8")
