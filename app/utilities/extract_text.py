@@ -48,6 +48,21 @@ CATEGORY_COLORS: Dict[str, str] = {
     "custom": "#95a5a6",
 }
 
+CATEGORY_LABELS: Dict[str, str] = {
+    "email": "Email Addresses",
+    "phone": "Phone Numbers",
+    "credit_card": "Credit Card Numbers",
+    "ssn": "Social Security Numbers",
+    "drivers_license": "Driver's Licenses",
+    "date": "Dates",
+    "address": "Addresses",
+    "name": "Names",
+    "ip_address": "IP Addresses",
+    "bank_account": "Bank Account Numbers",
+    "vin": "VIN Numbers",
+    "custom": "Custom Phrases",
+}
+
 
 # -----------------------------
 # Helpers
