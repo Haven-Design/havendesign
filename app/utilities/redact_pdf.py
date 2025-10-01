@@ -1,69 +1,43 @@
 import io
-from typing import List, Optional, Dict
+from typing import List, Dict
 import fitz  # PyMuPDF
-from .extract_text import Hit, CATEGORY_COLORS
+from .extract_text import Hit
 
+CATEGORY_COLORS: Dict[str, str] = {
+    "email": "#1f77b4",         # blue
+    "phone": "#2ca02c",         # green
+    "credit_card": "#d62728",   # red
+    "ssn": "#9467bd",           # purple
+    "drivers_license": "#ff7f0e",  # orange
+    "date": "#8c564b",
+    "address": "#17becf",
+    "name": "#e377c2",
+    "ip_address": "#7f7f7f",
+    "bank_account": "#bcbd22",
+    "vin": "#17becf",
+    "custom": "#000000",
+}
 
-def _hex_to_rgb_floats(hex_color: str):
-    hex_color = hex_color.lstrip("#")
-    return tuple(int(hex_color[i:i+2], 16) / 255.0 for i in (0, 2, 4))
+def redact_pdf_with_hits(file_bytes: bytes, hits: List[Hit], preview_mode: bool = True) -> bytes:
+    """Apply destructive black-box redactions to PDF."""
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
 
-
-def redact_pdf_with_hits(
-    input_path,
-    hits: List[Hit],
-    output_path: Optional[str] = None,
-    preview_mode: bool = False,
-    black_box: bool = True,
-) -> bytes:
-    """
-    Redacts or highlights hits in a PDF.
-    - input_path may be a file path OR raw PDF bytes.
-    - preview_mode=True → highlight with semi-transparent overlay
-    - preview_mode=False + black_box=True → destructive black box redaction
-    - preview_mode=False + black_box=False → destructive white redaction
-    """
-    if not hits:
-        if isinstance(input_path, (bytes, bytearray)):
-            return input_path
-        else:
-            with open(input_path, "rb") as f:
-                return f.read()
-
-    if isinstance(input_path, (bytes, bytearray)):
-        doc = fitz.open(stream=input_path, filetype="pdf")
-    else:
-        doc = fitz.open(input_path)
-
+    # Group hits by page
     page_hits: Dict[int, List[Hit]] = {}
     for h in hits:
         page_hits.setdefault(h.page, []).append(h)
 
-    for page_num, hlist in page_hits.items():
+    for page_num, phits in page_hits.items():
         page = doc[page_num]
-        for h in hlist:
-            bbox = getattr(h, "bbox", None)
-            if not bbox:
-                continue
-            rect = fitz.Rect(bbox)
+        for h in phits:
+            if h.bbox:
+                rect = fitz.Rect(h.bbox)
+                # Add redaction annotation
+                page.add_redact_annot(rect, fill=(0, 0, 0))  # Black box
+        # Apply all redactions on this page
+        page.apply_redactions()
 
-            if preview_mode:
-                # Colored highlight preview
-                color = CATEGORY_COLORS.get(h.category, "#FF0000")
-                rgb = _hex_to_rgb_floats(color)
-                page.draw_rect(rect, color=rgb, fill=(*rgb, 0.25), width=0.8)
-            else:
-                # True redaction (black or white box)
-                fill_color = (0, 0, 0) if black_box else (1, 1, 1)
-                red = page.add_redact_annot(rect, fill=fill_color)
-                if red:
-                    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
-
-    out_bytes = doc.write()
+    out_bytes = io.BytesIO()
+    doc.save(out_bytes)
     doc.close()
-
-    if output_path:
-        with open(output_path, "wb") as f:
-            f.write(out_bytes)
-
-    return out_bytes
+    return out_bytes.getvalue()
