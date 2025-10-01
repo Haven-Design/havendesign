@@ -147,19 +147,35 @@ if hits:
                 else:
                     selected_hit_ids.discard(hid)
 
-        # Download button
-        if st.session_state.file_bytes:
-            selected_hits = [id_to_hit[i] for i in selected_hit_ids]
-            final_bytes = redact_pdf_with_hits(
-                st.session_state.file_bytes,
-                selected_hits,
-                preview_mode=False,
-            )
-            st.download_button(
-                "Download Redacted File",
-                data=final_bytes,
-                file_name="redacted.pdf",
-            )
+        # Download buttons
+if st.session_state.file_bytes:
+    selected_hits = [id_to_hit[i] for i in selected_hit_ids]
+
+    # Traditional black box redaction
+    black_bytes = redact_pdf_with_hits(
+        st.session_state.file_bytes,
+        selected_hits,
+        preview_mode=False,
+        black_box=True,
+    )
+    st.download_button(
+        "Download Redacted PDF (Black Boxes)",
+        data=black_bytes,
+        file_name="redacted.pdf",
+    )
+
+    # Highlight-only (non-destructive)
+    highlight_bytes = redact_pdf_with_hits(
+        st.session_state.file_bytes,
+        selected_hits,
+        preview_mode=True,  # highlight instead of remove
+    )
+    st.download_button(
+        "Download Highlighted PDF (Keep Text)",
+        data=highlight_bytes,
+        file_name="highlighted.pdf",
+    )
+
 
     with right_col:
         st.markdown("### Preview")

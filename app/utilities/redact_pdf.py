@@ -4,7 +4,6 @@ import fitz  # PyMuPDF
 from .extract_text import Hit, CATEGORY_COLORS
 
 
-# Convert hex → RGB floats
 def _hex_to_rgb_floats(hex_color: str):
     hex_color = hex_color.lstrip("#")
     return tuple(int(hex_color[i:i+2], 16) / 255.0 for i in (0, 2, 4))
@@ -15,12 +14,14 @@ def redact_pdf_with_hits(
     hits: List[Hit],
     output_path: Optional[str] = None,
     preview_mode: bool = False,
+    black_box: bool = True,
 ) -> bytes:
     """
     Redacts or highlights hits in a PDF.
     - input_path may be a file path OR raw PDF bytes.
     - preview_mode=True → highlight with semi-transparent overlay
-    - preview_mode=False → true redaction (white-out)
+    - preview_mode=False + black_box=True → destructive black box redaction
+    - preview_mode=False + black_box=False → destructive white redaction
     """
     if not hits:
         if isinstance(input_path, (bytes, bytearray)):
@@ -29,13 +30,11 @@ def redact_pdf_with_hits(
             with open(input_path, "rb") as f:
                 return f.read()
 
-    # ✅ handle bytes vs filepath
     if isinstance(input_path, (bytes, bytearray)):
         doc = fitz.open(stream=input_path, filetype="pdf")
     else:
         doc = fitz.open(input_path)
 
-    # Group hits by page
     page_hits: Dict[int, List[Hit]] = {}
     for h in hits:
         page_hits.setdefault(h.page, []).append(h)
@@ -49,11 +48,14 @@ def redact_pdf_with_hits(
             rect = fitz.Rect(bbox)
 
             if preview_mode:
+                # Colored highlight preview
                 color = CATEGORY_COLORS.get(h.category, "#FF0000")
                 rgb = _hex_to_rgb_floats(color)
-                page.draw_rect(rect, color=rgb, fill=(*rgb, 0.2), width=0.8)
+                page.draw_rect(rect, color=rgb, fill=(*rgb, 0.25), width=0.8)
             else:
-                red = page.add_redact_annot(rect, fill=(1, 1, 1))
+                # True redaction (black or white box)
+                fill_color = (0, 0, 0) if black_box else (1, 1, 1)
+                red = page.add_redact_annot(rect, fill=fill_color)
                 if red:
                     page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
@@ -65,33 +67,3 @@ def redact_pdf_with_hits(
             f.write(out_bytes)
 
     return out_bytes
-
-
-def save_masked_file(file_bytes: bytes, ext: str, hits: List[Hit]) -> bytes:
-    """
-    For DOCX/TXT: replace selected hits with █ characters.
-    """
-    if not hits:
-        return file_bytes
-
-    if ext == ".txt":
-        text = file_bytes.decode("utf-8", errors="ignore")
-        for h in hits:
-            text = text.replace(h.text, "█" * len(h.text))
-        return text.encode("utf-8")
-
-    elif ext == ".docx":
-        from docx import Document
-        from io import BytesIO
-
-        doc = Document(io.BytesIO(file_bytes))
-        for para in doc.paragraphs:
-            for h in hits:
-                if h.text in para.text:
-                    para.text = para.text.replace(h.text, "█" * len(h.text))
-
-        buf = io.BytesIO()
-        doc.save(buf)
-        return buf.getvalue()
-
-    return file_bytes
