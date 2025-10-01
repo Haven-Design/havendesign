@@ -1,9 +1,7 @@
 """
 extract_text.py
-
 Produces Hit objects for each detected sensitive phrase in a PDF/DOCX/TXT.
 For PDFs, each Hit includes a merged bbox (x0,y0,x1,y1) to use for precise redaction.
-The extractor accepts a list of categories (strings) and an optional custom phrase.
 """
 
 import re
@@ -118,11 +116,9 @@ def _page_hits_from_text(page, page_text: str, categories: List[str], custom_phr
             continue
         flags = re.IGNORECASE if cat in ("address", "bank_account") else 0
         for m in re.finditer(pattern, page_text, flags=flags):
-            # post-filters
             match_text = m.group(0)
             if cat == "credit_card" and not luhn_valid(match_text):
                 continue
-            # find visual rects for this matched string and merge into one bbox
             try:
                 rects = page.search_for(match_text, quads=False) or []
             except Exception:
@@ -162,8 +158,8 @@ def _page_hits_from_text(page, page_text: str, categories: List[str], custom_phr
 # -----------------------
 def extract_text_and_positions(file_bytes: bytes, ext: str, categories: List[str], custom_phrase: Optional[str] = None) -> List[Hit]:
     """
-    ext should be '.pdf' or '.docx' or '.txt' (currently PDF robustly supported).
-    categories is a list of category keys (e.g. ['email','phone','credit_card']) or may include a custom string.
+    ext should be '.pdf' or '.docx' or '.txt'.
+    categories is a list of category keys (e.g. ['email','phone','credit_card']).
     """
     hits: List[Hit] = []
 
@@ -174,7 +170,6 @@ def extract_text_and_positions(file_bytes: bytes, ext: str, categories: List[str
             hits.extend(_page_hits_from_text(page, page_text, categories, custom_phrase))
         doc.close()
     elif ext == ".docx" or ext == ".txt":
-        # Basic text-mode matching (no bboxes). We'll still return Hit objects with bbox=None
         try:
             import docx
         except Exception:
@@ -195,7 +190,6 @@ def extract_text_and_positions(file_bytes: bytes, ext: str, categories: List[str
                 for m in re.finditer(re.escape(custom_phrase), combined, flags=re.IGNORECASE):
                     hits.append(Hit(text=m.group(0), page=0, category="custom", bbox=None, start=m.start(), end=m.end()))
         else:
-            # txt
             txt = file_bytes.decode("utf-8", errors="ignore")
             for cat, pattern in CATEGORY_PATTERNS.items():
                 if cat not in categories:

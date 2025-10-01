@@ -1,7 +1,7 @@
 """
 redact_pdf.py
 
-Provides redact_pdf_with_hits(file_bytes_or_path, hits, preview_mode, black_box)
+Provides redact_pdf_with_hits(input_source, hits, preview_mode, black_box)
 - preview_mode=True => draws semi-transparent colored overlays (non-destructive preview)
 - preview_mode=False => applies destructive redaction using black boxes (default behavior)
 """
@@ -10,7 +10,6 @@ import io
 from typing import List, Optional, Dict, Union
 import fitz  # PyMuPDF
 
-# We import CATEGORY_COLORS only for consistent preview colors
 from .extract_text import CATEGORY_COLORS, Hit
 
 def _hex_to_rgb_floats(hex_color: str):
@@ -45,31 +44,25 @@ def redact_pdf_with_hits(
     # Iterate pages and draw/add redaction annotations
     for page_num, phits in page_map.items():
         page = doc[page_num]
-        # Add annotations first, apply once per page for destructive redaction
         for h in phits:
             if not h.bbox:
                 continue
             x0, y0, x1, y1 = h.bbox
-            # expand small amount to ensure full coverage (1.2pt padding)
             pad = 1.2
             rect = fitz.Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad)
 
             if preview_mode:
                 color = CATEGORY_COLORS.get(h.category, "#000000")
                 rgb = _hex_to_rgb_floats(color)
-                # draw a semi-transparent filled rectangle
                 page.draw_rect(rect, color=rgb, fill=(*rgb, 0.22), width=0.6)
             else:
-                # destructive redaction
                 fill = (0, 0, 0) if black_box else (1, 1, 1)
                 page.add_redact_annot(rect, fill=fill)
 
         if not preview_mode:
-            # apply redactions on page (applies all redact annots added)
             try:
                 page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
             except Exception:
-                # fallback: apply without restricting images
                 page.apply_redactions()
 
     out = io.BytesIO()
@@ -82,10 +75,6 @@ def redact_pdf_with_hits(
     return data
 
 def save_masked_file(file_bytes: bytes, ext: str, hits: List[Hit]) -> bytes:
-    """
-    For non-pdf files: destructive masking by replacing occurrences with block characters.
-    Replaces longer hits first to avoid partial overlap replacements.
-    """
     if not hits:
         return file_bytes
 
@@ -108,7 +97,6 @@ def save_masked_file(file_bytes: bytes, ext: str, hits: List[Hit]) -> bytes:
             for h in sorted(hits, key=lambda x: len(x.text), reverse=True):
                 new_text = new_text.replace(h.text, "█" * len(h.text))
             if new_text != para_text:
-                # wipe runs, replace with a single run - preserves some formatting but simplifies
                 for r in para.runs:
                     r.text = ""
                 para.add_run(new_text)
