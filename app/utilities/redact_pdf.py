@@ -4,28 +4,36 @@ import fitz  # PyMuPDF
 from .extract_text import Hit, CATEGORY_COLORS
 
 
-# Colors in RGB (0–1 float)
+# Convert hex → RGB floats
 def _hex_to_rgb_floats(hex_color: str):
     hex_color = hex_color.lstrip("#")
     return tuple(int(hex_color[i:i+2], 16) / 255.0 for i in (0, 2, 4))
 
 
 def redact_pdf_with_hits(
-    input_path: str,
+    input_path,
     hits: List[Hit],
     output_path: Optional[str] = None,
     preview_mode: bool = False,
 ) -> bytes:
     """
     Redacts or highlights hits in a PDF.
+    - input_path may be a file path OR raw PDF bytes.
     - preview_mode=True → highlight with semi-transparent overlay
-    - preview_mode=False → true white-box redaction
+    - preview_mode=False → true redaction (white-out)
     """
     if not hits:
-        with open(input_path, "rb") as f:
-            return f.read()
+        if isinstance(input_path, (bytes, bytearray)):
+            return input_path
+        else:
+            with open(input_path, "rb") as f:
+                return f.read()
 
-    doc = fitz.open(input_path)
+    # ✅ handle bytes vs filepath
+    if isinstance(input_path, (bytes, bytearray)):
+        doc = fitz.open(stream=input_path, filetype="pdf")
+    else:
+        doc = fitz.open(input_path)
 
     # Group hits by page
     page_hits: Dict[int, List[Hit]] = {}
@@ -37,7 +45,7 @@ def redact_pdf_with_hits(
         for h in hlist:
             bbox = getattr(h, "bbox", None)
             if not bbox:
-                continue  # skip if no geometry
+                continue
             rect = fitz.Rect(bbox)
 
             if preview_mode:
