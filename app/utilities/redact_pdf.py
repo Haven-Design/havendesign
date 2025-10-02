@@ -1,17 +1,15 @@
 """
-redact_pdf.py (v1.4)
+redact_pdf.py (v1.4.2)
 
-- Converts hex category colors to normalized RGB values for PyMuPDF.
-- preview_mode=True -> translucent colored rectangles (non-destructive preview)
-- preview_mode=False -> destructive black box redaction
-- Applies redactions only on pages that have redact annotations
+- Converts hex colors to normalized RGB for PyMuPDF.
+- preview_mode=True -> translucent colored rect (non-destructive preview)
+- preview_mode=False -> destructive black-box redaction
 """
 
 from typing import List, Dict, Tuple
 import fitz  # PyMuPDF
 from utilities.extract_text import Hit
 
-# Category color hex palette (kept consistent with extractor)
 CATEGORY_COLORS: Dict[str, str] = {
     "email": "#EF4444",
     "phone": "#10B981",
@@ -35,52 +33,37 @@ def hex_to_rgb_norm(hex_color: str) -> Tuple[float, float, float]:
     return (r / 255.0, g / 255.0, b / 255.0)
 
 def redact_pdf_with_hits(file_bytes: bytes, hits: List[Hit], preview_mode: bool = False) -> bytes:
-    """
-    Input: raw PDF bytes and list of Hit objects.
-    Returns modified PDF bytes (either preview annotated or redacted).
-    """
     doc = fitz.open(stream=file_bytes, filetype="pdf")
-
-    # Group hits by page
     page_map: Dict[int, List[Hit]] = {}
     for h in hits:
         page_map.setdefault(h.page, []).append(h)
 
-    # Track which pages had redaction annots so we only apply where necessary
     pages_to_apply = set()
-
-    for page_num, phits in page_map.items():
-        if page_num < 0 or page_num >= len(doc):
+    for pnum, phits in page_map.items():
+        if pnum < 0 or pnum >= len(doc):
             continue
-        page = doc[page_num]
+        page = doc[pnum]
         for h in phits:
-            # Only handle hits with bbox for PDF operations
             if not h.bbox:
                 continue
             x0, y0, x1, y1 = h.bbox
-            pad = 1.0  # small padding to avoid stray letters
+            pad = 1.2
             rect = fitz.Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad)
-
             if preview_mode:
-                hexc = CATEGORY_COLORS.get(h.category, "#000000")
-                rgb = hex_to_rgb_norm(hexc)
+                color_hex = CATEGORY_COLORS.get(h.category, "#000000")
+                rgb = hex_to_rgb_norm(color_hex)
                 annot = page.add_rect_annot(rect)
                 annot.set_colors(stroke=rgb, fill=rgb)
-                annot.set_opacity(0.30)
+                annot.set_opacity(0.35)
                 annot.update()
             else:
-                # destructive black box
                 page.add_redact_annot(rect, fill=(0, 0, 0))
-                pages_to_apply.add(page_num)
-
-    # Apply redactions only where added
-    for pnum in pages_to_apply:
+                pages_to_apply.add(pnum)
+    for p in pages_to_apply:
         try:
-            doc[pnum].apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+            doc[p].apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
         except Exception:
-            # fallback
-            doc[pnum].apply_redactions()
-
+            doc[p].apply_redactions()
     out = doc.tobytes()
     doc.close()
     return out

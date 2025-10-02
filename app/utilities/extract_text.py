@@ -1,9 +1,7 @@
 """
-extract_text.py (v1.4)
+extract_text.py (v1.4.2)
 
-Produces Hit objects with text, page, category, start/end (character spans) and
-a merged bbox (x0,y0,x1,y1) when possible for PDF pages. Designed to avoid
-over-redaction by filtering overlapping matches according to a priority order.
+Produces Hit objects with text, page, category, start/end spans and merged bbox where possible.
 """
 
 import re
@@ -11,9 +9,6 @@ from typing import List, Optional, Tuple, Dict
 import fitz  # PyMuPDF
 import io
 
-# -----------------------
-# Hit model
-# -----------------------
 class Hit:
     def __init__(
         self,
@@ -34,9 +29,7 @@ class Hit:
     def __repr__(self):
         return f"Hit({self.category!r}, p{self.page+1}, {self.text!r})"
 
-# -----------------------
-# Patterns and labels
-# -----------------------
+# Patterns
 CATEGORY_PATTERNS: Dict[str, str] = {
     "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
     "phone": r"(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b",
@@ -66,7 +59,6 @@ CATEGORY_LABELS: Dict[str, str] = {
     "custom": "Custom Phrases",
 }
 
-# Soft modern palette — kept for consistency
 CATEGORY_COLORS: Dict[str, str] = {
     "email": "#EF4444",
     "phone": "#10B981",
@@ -82,9 +74,6 @@ CATEGORY_COLORS: Dict[str, str] = {
     "custom": "#94A3B8",
 }
 
-# -----------------------
-# Helpers
-# -----------------------
 def _merge_rects(rects: List[fitz.Rect]) -> Optional[Tuple[float, float, float, float]]:
     if not rects:
         return None
@@ -108,7 +97,6 @@ def luhn_valid(num: str) -> bool:
         checksum += d
     return (checksum + digits[-1]) % 10 == 0
 
-# Priority order (used to deconflict overlapping spans)
 PRIORITY = [
     "credit_card",
     "ssn",
@@ -124,34 +112,24 @@ PRIORITY = [
     "custom",
 ]
 
-# -----------------------
-# Page-level extraction (PDF)
-# -----------------------
 def _page_hits_from_text(page, page_text: str, categories: List[str], custom_phrase: Optional[str]) -> List[Hit]:
     hits: List[Hit] = []
-
     for cat, pattern in CATEGORY_PATTERNS.items():
         if cat not in categories:
             continue
-        flags = re.IGNORECASE
-        for m in re.finditer(pattern, page_text, flags=flags):
+        for m in re.finditer(pattern, page_text, flags=re.IGNORECASE):
             text = m.group(0)
-            # Post-filters
             if cat == "credit_card" and not luhn_valid(text):
                 continue
             start, end = m.start(), m.end()
-
-            # Try to locate the matched text visually on the page.
             rects = []
             try:
                 rects = page.search_for(text, quads=False) or []
             except Exception:
                 rects = []
             bbox = _merge_rects(rects)
-
             hits.append(Hit(text=text, page=page.number, category=cat, start=start, end=end, bbox=bbox))
 
-    # custom phrase
     if custom_phrase:
         for m in re.finditer(re.escape(custom_phrase), page_text, flags=re.IGNORECASE):
             text = m.group(0)
@@ -164,64 +142,47 @@ def _page_hits_from_text(page, page_text: str, categories: List[str], custom_phr
             bbox = _merge_rects(rects)
             hits.append(Hit(text=text, page=page.number, category="custom", start=start, end=end, bbox=bbox))
 
-    # Sort hits by page span then priority to deconflict overlaps
+    # sort & filter overlaps by priority
     hits.sort(key=lambda h: (h.start if h.start is not None else -1, PRIORITY.index(h.category) if h.category in PRIORITY else 999))
-
-    # Filter overlapping spans: keep first highest-priority non-overlapping hits
     filtered: List[Hit] = []
-    occupied_spans: List[Tuple[int, int]] = []
+    occupied: List[Tuple[int, int]] = []
     for h in hits:
         if h.start is None:
             filtered.append(h)
             continue
-        overlap = any(not (h.end <= s or h.start >= e) for s, e in occupied_spans)
+        overlap = any(not (h.end <= s or h.start >= e) for s, e in occupied)
         if not overlap:
             filtered.append(h)
-            occupied_spans.append((h.start, h.end))
-
+            occupied.append((h.start, h.end))
     return filtered
 
-# -----------------------
-# Public extractor
-# -----------------------
 def extract_text_and_positions(file_bytes: bytes, ext: str, categories: List[str], custom_phrase: Optional[str] = None) -> List[Hit]:
-    """
-    ext: '.pdf' (recommended), '.docx', '.txt'
-    categories: list of category keys (e.g. ['email','phone','credit_card'])
-    """
     hits: List[Hit] = []
-
     if ext == ".pdf":
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         for page in doc:
             page_text = page.get_text()
-            page_hits = _page_hits_from_text(page, page_text, categories, custom_phrase)
-            hits.extend(page_hits)
+            hits.extend(_page_hits_from_text(page, page_text, categories, custom_phrase))
         doc.close()
-
     elif ext == ".docx":
         try:
             import docx
-            doc = docx.Document(io.BytesIO(file_bytes))
-            combined = "\n".join(p.text for p in doc.paragraphs)
-            # Use a dummy page object for text-only results (no bbox)
+            d = docx.Document(io.BytesIO(file_bytes))
+            combined = "\n".join(p.text for p in d.paragraphs)
             class Dummy:
                 number = 0
                 def search_for(self, s): return []
             hits.extend(_page_hits_from_text(Dummy(), combined, categories, custom_phrase))
         except Exception:
-            # fallback to text-only processing
             txt = file_bytes.decode("utf-8", errors="ignore")
             class Dummy:
                 number = 0
                 def search_for(self, s): return []
             hits.extend(_page_hits_from_text(Dummy(), txt, categories, custom_phrase))
-
     elif ext == ".txt":
         txt = file_bytes.decode("utf-8", errors="ignore")
         class Dummy:
             number = 0
             def search_for(self, s): return []
         hits.extend(_page_hits_from_text(Dummy(), txt, categories, custom_phrase))
-
     return hits
