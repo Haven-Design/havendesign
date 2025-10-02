@@ -1,38 +1,56 @@
-import re
-from typing import List, Optional, Dict, Tuple
-import fitz  # PyMuPDF
-from docx import Document
+"""
+extract_text.py (v1.4)
 
-# -------------------------------
-# Data structure for hits
-# -------------------------------
+Produces Hit objects with text, page, category, start/end (character spans) and
+a merged bbox (x0,y0,x1,y1) when possible for PDF pages. Designed to avoid
+over-redaction by filtering overlapping matches according to a priority order.
+"""
+
+import re
+from typing import List, Optional, Tuple, Dict
+import fitz  # PyMuPDF
+import io
+
+# -----------------------
+# Hit model
+# -----------------------
 class Hit:
-    def __init__(self, page: int, text: str, category: str, bbox: Optional[Tuple[float, float, float, float]] = None):
-        self.page = page
+    def __init__(
+        self,
+        text: str,
+        page: int,
+        category: str,
+        start: Optional[int] = None,
+        end: Optional[int] = None,
+        bbox: Optional[Tuple[float, float, float, float]] = None,
+    ):
         self.text = text
+        self.page = page
         self.category = category
+        self.start = start
+        self.end = end
         self.bbox = bbox
 
-# -------------------------------
-# Regex patterns for categories
-# -------------------------------
+    def __repr__(self):
+        return f"Hit({self.category!r}, p{self.page+1}, {self.text!r})"
+
+# -----------------------
+# Patterns and labels
+# -----------------------
 CATEGORY_PATTERNS: Dict[str, str] = {
     "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-    "phone": r"\b(?:\+?\d{1,2}\s?)?(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}\b",
-    "credit_card": r"\b(?:\d[ -]*?){13,16}\b",
+    "phone": r"(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b",
+    "credit_card": r"\b(?:\d[ -]?){13,19}\b",
     "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
-    "drivers_license": r"\b[A-Z0-9]{5,12}\b",
-    "date": r"\b(?:\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{2,4})\b",
-    "address": r"\b\d{1,5}\s+\w+(?:\s\w+){0,3},?\s\w+,?\s\w{2}\s\d{5}\b",
-    "name": r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)+)\b",
-    "ip_address": r"\b\d{1,3}(?:\.\d{1,3}){3}\b",
-    "bank_account": r"\b\d{9,18}\b",
-    "vin": r"\b[A-HJ-NPR-Z0-9]{17}\b",
+    "drivers_license": r"\b[A-Z0-9]{5,15}\b",
+    "date": r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b",
+    "address": r"\b\d{1,6}\s+[0-9A-Za-z.'\-]+\s+(?:St|Street|Ave|Avenue|Blvd|Boulevard|Rd|Road|Ln|Lane|Dr|Drive|Ct|Court)\b\.?",
+    "name": r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+){1,2}\b",
+    "ip_address": r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?!$)|$)){4}\b",
+    "bank_account": r"\b\d{8,18}\b",
+    "vin": r"\b(?!.*[IOQ])[A-HJ-NPR-Z0-9]{17}\b",
 }
 
-# -------------------------------
-# Labels (for UI display)
-# -------------------------------
 CATEGORY_LABELS: Dict[str, str] = {
     "email": "Email Addresses",
     "phone": "Phone Numbers",
@@ -48,79 +66,162 @@ CATEGORY_LABELS: Dict[str, str] = {
     "custom": "Custom Phrases",
 }
 
-# -------------------------------
-# Helper: luhn check for credit cards
-# -------------------------------
-def luhn_valid(num_str: str) -> bool:
-    digits = [int(d) for d in re.sub(r"\D", "", num_str)]
-    checksum = 0
-    parity = len(digits) % 2
-    for i, digit in enumerate(digits):
-        if i % 2 == parity:
-            digit *= 2
-            if digit > 9:
-                digit -= 9
-        checksum += digit
-    return checksum % 10 == 0
+# Soft modern palette — kept for consistency
+CATEGORY_COLORS: Dict[str, str] = {
+    "email": "#EF4444",
+    "phone": "#10B981",
+    "credit_card": "#3B82F6",
+    "ssn": "#F59E0B",
+    "drivers_license": "#6366F1",
+    "date": "#8B5CF6",
+    "address": "#14B8A6",
+    "name": "#EC4899",
+    "ip_address": "#0EA5E9",
+    "bank_account": "#F97316",
+    "vin": "#6B7280",
+    "custom": "#94A3B8",
+}
 
-# -------------------------------
-# Extract matches from one page
-# -------------------------------
-def _page_hits_from_text(page, page_text: str, params: List[str], custom_phrase: Optional[str]) -> List[Hit]:
+# -----------------------
+# Helpers
+# -----------------------
+def _merge_rects(rects: List[fitz.Rect]) -> Optional[Tuple[float, float, float, float]]:
+    if not rects:
+        return None
+    x0 = min(r.x0 for r in rects)
+    y0 = min(r.y0 for r in rects)
+    x1 = max(r.x1 for r in rects)
+    y1 = max(r.y1 for r in rects)
+    return (x0, y0, x1, y1)
+
+def luhn_valid(num: str) -> bool:
+    digits = [int(d) for d in re.sub(r"\D", "", num)]
+    if len(digits) < 13 or len(digits) > 19:
+        return False
+    checksum = 0
+    parity = (len(digits) - 2) % 2
+    for i, d in enumerate(digits[:-1]):
+        if i % 2 == parity:
+            d *= 2
+            if d > 9:
+                d -= 9
+        checksum += d
+    return (checksum + digits[-1]) % 10 == 0
+
+# Priority order (used to deconflict overlapping spans)
+PRIORITY = [
+    "credit_card",
+    "ssn",
+    "bank_account",
+    "drivers_license",
+    "email",
+    "phone",
+    "ip_address",
+    "date",
+    "address",
+    "name",
+    "vin",
+    "custom",
+]
+
+# -----------------------
+# Page-level extraction (PDF)
+# -----------------------
+def _page_hits_from_text(page, page_text: str, categories: List[str], custom_phrase: Optional[str]) -> List[Hit]:
     hits: List[Hit] = []
 
     for cat, pattern in CATEGORY_PATTERNS.items():
-        if cat not in params:
+        if cat not in categories:
             continue
-
-        flags = re.IGNORECASE if cat in ("address", "iban", "bank_account") else 0
+        flags = re.IGNORECASE
         for m in re.finditer(pattern, page_text, flags=flags):
-            if cat == "credit_card" and not luhn_valid(m.group(0)):
-                continue
-
             text = m.group(0)
-            bbox = None
+            # Post-filters
+            if cat == "credit_card" and not luhn_valid(text):
+                continue
+            start, end = m.start(), m.end()
 
-            # Try to find bbox for match
-            for inst in page.search_for(text):
-                bbox = tuple(inst)
-                break
+            # Try to locate the matched text visually on the page.
+            rects = []
+            try:
+                rects = page.search_for(text, quads=False) or []
+            except Exception:
+                rects = []
+            bbox = _merge_rects(rects)
 
-            hits.append(Hit(page=page.number, text=text, category=cat, bbox=bbox))
+            hits.append(Hit(text=text, page=page.number, category=cat, start=start, end=end, bbox=bbox))
 
+    # custom phrase
     if custom_phrase:
         for m in re.finditer(re.escape(custom_phrase), page_text, flags=re.IGNORECASE):
             text = m.group(0)
-            bbox = None
-            for inst in page.search_for(text):
-                bbox = tuple(inst)
-                break
-            hits.append(Hit(page=page.number, text=text, category="custom", bbox=bbox))
+            start, end = m.start(), m.end()
+            rects = []
+            try:
+                rects = page.search_for(text, quads=False) or []
+            except Exception:
+                rects = []
+            bbox = _merge_rects(rects)
+            hits.append(Hit(text=text, page=page.number, category="custom", start=start, end=end, bbox=bbox))
 
-    return hits
+    # Sort hits by page span then priority to deconflict overlaps
+    hits.sort(key=lambda h: (h.start if h.start is not None else -1, PRIORITY.index(h.category) if h.category in PRIORITY else 999))
 
-# -------------------------------
-# Main extraction
-# -------------------------------
-def extract_text_and_positions(file_bytes: bytes, ext: str, params: List[str], custom_phrase: Optional[str] = None) -> List[Hit]:
+    # Filter overlapping spans: keep first highest-priority non-overlapping hits
+    filtered: List[Hit] = []
+    occupied_spans: List[Tuple[int, int]] = []
+    for h in hits:
+        if h.start is None:
+            filtered.append(h)
+            continue
+        overlap = any(not (h.end <= s or h.start >= e) for s, e in occupied_spans)
+        if not overlap:
+            filtered.append(h)
+            occupied_spans.append((h.start, h.end))
+
+    return filtered
+
+# -----------------------
+# Public extractor
+# -----------------------
+def extract_text_and_positions(file_bytes: bytes, ext: str, categories: List[str], custom_phrase: Optional[str] = None) -> List[Hit]:
+    """
+    ext: '.pdf' (recommended), '.docx', '.txt'
+    categories: list of category keys (e.g. ['email','phone','credit_card'])
+    """
     hits: List[Hit] = []
 
     if ext == ".pdf":
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         for page in doc:
-            text = page.get_text()
-            hits.extend(_page_hits_from_text(page, text, params, custom_phrase))
+            page_text = page.get_text()
+            page_hits = _page_hits_from_text(page, page_text, categories, custom_phrase)
+            hits.extend(page_hits)
         doc.close()
 
     elif ext == ".docx":
-        doc = Document(file_bytes)
-        full_text = "\n".join(p.text for p in doc.paragraphs)
-        dummy_page = type("DummyPage", (), {"number": 0, "search_for": lambda self, t: []})()
-        hits.extend(_page_hits_from_text(dummy_page, full_text, params, custom_phrase))
+        try:
+            import docx
+            doc = docx.Document(io.BytesIO(file_bytes))
+            combined = "\n".join(p.text for p in doc.paragraphs)
+            # Use a dummy page object for text-only results (no bbox)
+            class Dummy:
+                number = 0
+                def search_for(self, s): return []
+            hits.extend(_page_hits_from_text(Dummy(), combined, categories, custom_phrase))
+        except Exception:
+            # fallback to text-only processing
+            txt = file_bytes.decode("utf-8", errors="ignore")
+            class Dummy:
+                number = 0
+                def search_for(self, s): return []
+            hits.extend(_page_hits_from_text(Dummy(), txt, categories, custom_phrase))
 
     elif ext == ".txt":
-        text = file_bytes.decode("utf-8")
-        dummy_page = type("DummyPage", (), {"number": 0, "search_for": lambda self, t: []})()
-        hits.extend(_page_hits_from_text(dummy_page, text, params, custom_phrase))
+        txt = file_bytes.decode("utf-8", errors="ignore")
+        class Dummy:
+            number = 0
+            def search_for(self, s): return []
+        hits.extend(_page_hits_from_text(Dummy(), txt, categories, custom_phrase))
 
     return hits
