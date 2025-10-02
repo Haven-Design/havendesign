@@ -1,107 +1,67 @@
-"""
-redact_pdf.py
-
-Provides redact_pdf_with_hits(input_source, hits, preview_mode, black_box)
-- preview_mode=True => draws semi-transparent colored overlays (non-destructive preview)
-- preview_mode=False => applies destructive redaction using black boxes (default behavior)
-"""
-
-import io
-from typing import List, Optional, Dict, Union
+from typing import List, Dict, Tuple
 import fitz  # PyMuPDF
+from utilities.extract_text import Hit
 
-from .extract_text import CATEGORY_COLORS, Hit
-
-def _hex_to_rgb_floats(hex_color: str):
+# -------------------------------
+# Convert hex colors → normalized RGB (0–1)
+# -------------------------------
+def hex_to_rgb(hex_color: str) -> Tuple[float, float, float]:
     hex_color = hex_color.lstrip("#")
-    return tuple(int(hex_color[i:i+2], 16) / 255.0 for i in (0, 2, 4))
+    r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    return (r / 255.0, g / 255.0, b / 255.0)
 
-def redact_pdf_with_hits(
-    input_source: Union[str, bytes],
-    hits: List[Hit],
-    output_path: Optional[str] = None,
-    preview_mode: bool = False,
-    black_box: bool = True,
-) -> bytes:
-    """
-    input_source: either raw PDF bytes or a file path
-    hits: list of Hit objects (only hits with bbox for PDFs will be drawn/redacted)
-    preview_mode: if True, draw semi-transparent colored rects (keeps text)
-    preview_mode False + black_box True: destructive black rectangles
-    """
+# -------------------------------
+# Category color palette
+# -------------------------------
+CATEGORY_COLORS: Dict[str, str] = {
+    "email": "#e74c3c",          # red
+    "phone": "#2ecc71",          # green
+    "credit_card": "#3498db",    # blue
+    "ssn": "#f1c40f",            # yellow
+    "drivers_license": "#e67e22",# orange
+    "date": "#9b59b6",           # purple
+    "address": "#1abc9c",        # teal
+    "name": "#34495e",           # dark gray-blue
+    "ip_address": "#16a085",     # green/teal
+    "bank_account": "#d35400",   # dark orange
+    "vin": "#7f8c8d",            # gray
+    "custom": "#95a5a6",         # light gray
+}
 
-    # Read/prepare the doc
-    if isinstance(input_source, (bytes, bytearray)):
-        doc = fitz.open(stream=input_source, filetype="pdf")
-    else:
-        doc = fitz.open(input_source)
+# -------------------------------
+# Redaction function
+# -------------------------------
+def redact_pdf_with_hits(file_bytes: bytes, hits: List[Hit], preview_mode: bool = False) -> bytes:
+    """Apply highlights (preview) or black-box redactions (download)."""
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
 
     # Group hits by page
-    page_map: Dict[int, List[Hit]] = {}
+    page_hits: Dict[int, List[Hit]] = {}
     for h in hits:
-        page_map.setdefault(h.page, []).append(h)
+        page_hits.setdefault(h.page, []).append(h)
 
-    # Iterate pages and draw/add redaction annotations
-    for page_num, phits in page_map.items():
+    for page_num, phits in page_hits.items():
         page = doc[page_num]
+
         for h in phits:
             if not h.bbox:
                 continue
-            x0, y0, x1, y1 = h.bbox
-            pad = 1.2
-            rect = fitz.Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+            rect = fitz.Rect(h.bbox)
 
             if preview_mode:
-                color = CATEGORY_COLORS.get(h.category, "#000000")
-                rgb = _hex_to_rgb_floats(color)
-                page.draw_rect(rect, color=rgb, fill=(*rgb, 0.22), width=0.6)
+                # Show semi-transparent colored box
+                color = hex_to_rgb(CATEGORY_COLORS.get(h.category, "#000000"))
+                annot = page.add_rect_annot(rect)
+                annot.set_colors(stroke=color, fill=color)
+                annot.set_opacity(0.35)
+                annot.update()
             else:
-                fill = (0, 0, 0) if black_box else (1, 1, 1)
-                page.add_redact_annot(rect, fill=fill)
+                # True destructive redaction (solid black box)
+                page.add_redact_annot(rect, fill=(0, 0, 0))
 
         if not preview_mode:
-            try:
-                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
-            except Exception:
-                page.apply_redactions()
+            page.apply_redactions()
 
-    out = io.BytesIO()
-    doc.save(out, garbage=4)
+    out_bytes = doc.tobytes()
     doc.close()
-    data = out.getvalue()
-    if output_path:
-        with open(output_path, "wb") as f:
-            f.write(data)
-    return data
-
-def save_masked_file(file_bytes: bytes, ext: str, hits: List[Hit]) -> bytes:
-    if not hits:
-        return file_bytes
-
-    if ext == ".txt":
-        text = file_bytes.decode("utf-8", errors="ignore")
-        for h in sorted(hits, key=lambda x: len(x.text), reverse=True):
-            text = text.replace(h.text, "█" * len(h.text))
-        return text.encode("utf-8")
-
-    if ext == ".docx":
-        try:
-            from docx import Document
-            from io import BytesIO
-        except Exception:
-            return file_bytes
-        doc = Document(io.BytesIO(file_bytes))
-        for para in doc.paragraphs:
-            para_text = para.text
-            new_text = para_text
-            for h in sorted(hits, key=lambda x: len(x.text), reverse=True):
-                new_text = new_text.replace(h.text, "█" * len(h.text))
-            if new_text != para_text:
-                for r in para.runs:
-                    r.text = ""
-                para.add_run(new_text)
-        out = io.BytesIO()
-        doc.save(out)
-        return out.getvalue()
-
-    return file_bytes
+    return out_bytes
