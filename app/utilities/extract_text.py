@@ -1,7 +1,8 @@
 """
-extract_text.py (v1.4.2)
+extract_text.py (v1.5)
 
-Produces Hit objects with text, page, category, start/end spans and merged bbox where possible.
+Stable extractor that returns Hit objects with text, page, category, start/end, bbox (when available).
+Applies a priority-based overlap filter to avoid over-redaction.
 """
 
 import re
@@ -29,7 +30,7 @@ class Hit:
     def __repr__(self):
         return f"Hit({self.category!r}, p{self.page+1}, {self.text!r})"
 
-# Patterns
+# patterns
 CATEGORY_PATTERNS: Dict[str, str] = {
     "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
     "phone": r"(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b",
@@ -59,6 +60,7 @@ CATEGORY_LABELS: Dict[str, str] = {
     "custom": "Custom Phrases",
 }
 
+# Colors are kept here for consistency; used by redact_pdf.
 CATEGORY_COLORS: Dict[str, str] = {
     "email": "#EF4444",
     "phone": "#10B981",
@@ -97,6 +99,7 @@ def luhn_valid(num: str) -> bool:
         checksum += d
     return (checksum + digits[-1]) % 10 == 0
 
+# priority for overlap selection (higher first)
 PRIORITY = [
     "credit_card",
     "ssn",
@@ -142,15 +145,15 @@ def _page_hits_from_text(page, page_text: str, categories: List[str], custom_phr
             bbox = _merge_rects(rects)
             hits.append(Hit(text=text, page=page.number, category="custom", start=start, end=end, bbox=bbox))
 
-    # sort & filter overlaps by priority
+    # Sort and filter overlaps
     hits.sort(key=lambda h: (h.start if h.start is not None else -1, PRIORITY.index(h.category) if h.category in PRIORITY else 999))
     filtered: List[Hit] = []
-    occupied: List[Tuple[int, int]] = []
+    occupied: List[Tuple[int,int]] = []
     for h in hits:
         if h.start is None:
             filtered.append(h)
             continue
-        overlap = any(not (h.end <= s or h.start >= e) for s, e in occupied)
+        overlap = any(not (h.end <= s or h.start >= e) for s,e in occupied)
         if not overlap:
             filtered.append(h)
             occupied.append((h.start, h.end))
@@ -162,13 +165,14 @@ def extract_text_and_positions(file_bytes: bytes, ext: str, categories: List[str
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         for page in doc:
             page_text = page.get_text()
-            hits.extend(_page_hits_from_text(page, page_text, categories, custom_phrase))
+            page_hits = _page_hits_from_text(page, page_text, categories, custom_phrase)
+            hits.extend(page_hits)
         doc.close()
     elif ext == ".docx":
         try:
             import docx
-            d = docx.Document(io.BytesIO(file_bytes))
-            combined = "\n".join(p.text for p in d.paragraphs)
+            doc = docx.Document(io.BytesIO(file_bytes))
+            combined = "\n".join(p.text for p in doc.paragraphs)
             class Dummy:
                 number = 0
                 def search_for(self, s): return []
