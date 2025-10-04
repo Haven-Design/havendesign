@@ -1,199 +1,159 @@
-"""
-main.py (v1.5)
-
-Stable UI focused on correctness:
-- Parent checkbox toggles children.
-- Child checkboxes are authoritative; selected set is derived after widgets are created.
-- Per-category collapse implemented with native checkbox (starts expanded).
-- Select / Deselect All (Results) button at the bottom.
-- Preview updates reliably and download redacts exactly selected items.
-"""
-
 import os
 import base64
-from typing import List, Dict, Set
+import tempfile
+from typing import List, Set, Dict
 
 import streamlit as st
+import streamlit.components.v1 as components
 
-from utilities.extract_text import extract_text_and_positions, CATEGORY_LABELS, CATEGORY_COLORS, Hit
+from utilities.extract_text import extract_text_and_positions, Hit
 from utilities.redact_pdf import redact_pdf_with_hits
+from components.redacted_list_component import redacted_list
 
 st.set_page_config(layout="wide")
-st.title("Redactor-API (v1.5)")
+st.title("PDF Redactor Tool")
 
-RESULT_HEIGHT_PX = 600
+# -----------------------
+# Session state init
+# -----------------------
+if "hits" not in st.session_state:
+    st.session_state.hits: List[Hit] = []
+if "selected_hit_ids" not in st.session_state:
+    st.session_state.selected_hit_ids: Set[int] = set()
+if "file_bytes" not in st.session_state:
+    st.session_state.file_bytes = None
+if "id_to_hit" not in st.session_state:
+    st.session_state.id_to_hit: Dict[int, Hit] = {}
 
-# session defaults
-st.session_state.setdefault("file_bytes", None)
-st.session_state.setdefault("ext", ".pdf")
-st.session_state.setdefault("hits", [])
-st.session_state.setdefault("id_to_hit", {})
-st.session_state.setdefault("selected_hit_ids", set())
-st.session_state.setdefault("collapsed", {})
+hits = st.session_state.hits
+selected_hit_ids = st.session_state.selected_hit_ids
+id_to_hit = st.session_state.id_to_hit
+temp_dir = tempfile.mkdtemp()
 
-# upload
-uploaded_file = st.file_uploader("Upload PDF/DOCX/TXT", type=["pdf", "docx", "txt"])
+# -----------------------
+# File upload
+# -----------------------
+uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
 if uploaded_file:
     st.session_state.file_bytes = uploaded_file.getvalue()
-    _, ext = os.path.splitext(uploaded_file.name)
-    st.session_state.ext = ext.lower()
-    # reset previous results
-    st.session_state.hits = []
-    st.session_state.id_to_hit = {}
-    st.session_state.selected_hit_ids = set()
-    st.session_state.collapsed = {}
 
-# selection parameters for scanning
-st.subheader("Select categories to scan (for the next Scan)")
-category_keys = list(CATEGORY_LABELS.keys())
-cols = st.columns(2)
-for i, k in enumerate(category_keys):
-    if f"param_{k}" not in st.session_state:
-        st.session_state[f"param_{k}"] = False
-    with cols[i % 2]:
-        st.checkbox(CATEGORY_LABELS[k], key=f"param_{k}")
+# -----------------------
+# Redaction parameters
+# -----------------------
+redaction_parameters = {
+    "Email Addresses": "email",
+    "Phone Numbers": "phone",
+    "Credit Card Numbers": "credit_card",
+    "Social Security Numbers": "ssn",
+    "Driver's Licenses": "drivers_license",
+    "Dates": "date",
+    "Addresses": "address",
+    "Names": "name",
+    "IP Addresses": "ip_address",
+    "Bank Account Numbers": "bank_account",
+    "VIN Numbers": "vin",
+}
 
-custom_phrase = st.text_input("Custom phrase (optional)")
+st.subheader("Select Redaction Parameters")
 
-# scan
-if st.button("Scan for Redacted Phrases") and st.session_state.file_bytes:
-    selected_categories = [k for k in category_keys if st.session_state.get(f"param_{k}", False)]
-    if custom_phrase and custom_phrase.strip():
-        selected_categories.append("custom")
+def _toggle_all():
+    current = any(st.session_state.get(f"param_{key}", False) for key in redaction_parameters.values())
+    for key in redaction_parameters.values():
+        st.session_state[f"param_{key}"] = not current
 
-    found = extract_text_and_positions(st.session_state.file_bytes, st.session_state.ext, selected_categories, custom_phrase if custom_phrase else None)
-    found.sort(key=lambda h: (h.page, h.start if getattr(h, "start", None) is not None else 1_000_000))
+st.button("Select/Deselect All Parameters", on_click=_toggle_all)
 
-    st.session_state.hits = found
-    st.session_state.id_to_hit = {i: h for i, h in enumerate(found)}
-    # default: select all hits
-    st.session_state.selected_hit_ids = set(st.session_state.id_to_hit.keys())
-    # default: expanded
-    for k in category_keys:
-        st.session_state.collapsed.setdefault(k, False)
+col1, col2 = st.columns(2)
+selected_params: List[str] = []
 
-# render results + preview side-by-side
-if st.session_state.hits:
+for i, (label, key) in enumerate(redaction_parameters.items()):
+    target_col = col1 if i % 2 == 0 else col2
+    with target_col:
+        if f"param_{key}" not in st.session_state:
+            st.session_state[f"param_{key}"] = False
+        if st.checkbox(label, key=f"param_{key}"):
+            selected_params.append(key)
+
+custom_phrase = st.text_input("Add a custom phrase to redact", placeholder="Type phrase and press Enter")
+if custom_phrase:
+    selected_params.append(custom_phrase)
+
+# -----------------------
+# Scan
+# -----------------------
+if st.button("Scan for Redacted Phrases") and uploaded_file and selected_params:
+    hits.clear()
+    id_to_hit.clear()
+    selected_hit_ids.clear()
+
+    new_hits = extract_text_and_positions(st.session_state.file_bytes, ".pdf", selected_params) or []
+    hits.extend(new_hits)
+
+    for idx, h in enumerate(hits):
+        hid = h.page * 1_000_000 + idx
+        id_to_hit[hid] = h
+        selected_hit_ids.add(hid)
+
+# -----------------------
+# Results & Preview
+# -----------------------
+if hits:
     left_col, right_col = st.columns([1, 1])
 
     with left_col:
-        st.markdown("<h3>Redacted Phrases</h3>", unsafe_allow_html=True)
+        st.markdown("### Redacted Phrases")
 
-        # small CSS to visually contain results and match preview height
-        st.markdown(
-            f"""
-            <style>
-            .results-box {{
-                max-height: {RESULT_HEIGHT_PX}px;
-                overflow-y: auto;
-                padding: 8px;
-                border: 1px solid #e6e6e6;
-                border-radius: 8px;
-                background: #fff;
-            }}
-            .cat-row {{ display:flex; align-items:center; gap:8px; padding:6px 2px; }}
-            .cat-label {{ font-weight:700; }}
-            .child-item {{ margin-left: 28px; padding: 4px 2px; }}
-            .bottom-row {{ margin-top:8px; text-align:center; }}
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
+        # Build data for React component
+        phrases_data: Dict[str, List[dict]] = {}
+        category_colors = {
+            "email": "#e63946",
+            "phone": "#2a9d8f",
+            "credit_card": "#264653",
+            "ssn": "#f4a261",
+            "drivers_license": "#e76f51",
+            "date": "#457b9d",
+            "address": "#8d99ae",
+            "name": "#6a4c93",
+            "ip_address": "#118ab2",
+            "bank_account": "#073b4c",
+            "vin": "#8338ec",
+            "custom": "#adb5bd",
+        }
 
-        st.markdown('<div class="results-box">', unsafe_allow_html=True)
+        for hid, h in id_to_hit.items():
+            color = category_colors.get(h.category, "#000000")
+            if h.category not in phrases_data:
+                phrases_data[h.category] = []
+            phrases_data[h.category].append({
+                "id": hid,
+                "text": h.text,
+                "page": h.page + 1,
+                "color": color,
+                "selected": hid in selected_hit_ids,
+            })
 
-        # group hits by category preserving order
-        grouped: Dict[str, List[int]] = {}
-        for idx, h in st.session_state.id_to_hit.items():
-            grouped.setdefault(h.category, []).append(idx)
+        updated_state = redacted_list(phrases_data, key="redacted-ui")
 
-        # build UI by canonical category order
-        for cat in category_keys:
-            if cat not in grouped:
-                continue
-            idxs = grouped[cat]
-            color = CATEGORY_COLORS.get(cat, "#111111")
+        if updated_state:
+            # Reset and update selected_hit_ids based on React component
+            selected_hit_ids.clear()
+            for cat, phrases in updated_state.items():
+                for p in phrases:
+                    if p.get("selected", False):
+                        selected_hit_ids.add(p["id"])
 
-            # parent checkbox key: set default BEFORE creating the checkbox
-            parent_key = f"cat_chk_{cat}"
-            default_parent = all(st.session_state.get(f"hit_{i}", True) for i in idxs)
-            st.session_state.setdefault(parent_key, default_parent)
+        if st.session_state.file_bytes:
+            selected_hits = [id_to_hit[i] for i in selected_hit_ids]
+            final_bytes = redact_pdf_with_hits(st.session_state.file_bytes, selected_hits, preview_mode=False)
+            st.download_button("Download PDF", data=final_bytes, file_name="redacted.pdf")
 
-            # create a single-row layout for the category header:
-            c1, c2, c3 = st.columns([0.06, 0.78, 0.16])
-            with c1:
-                # create parent checkbox (no visible label)
-                _ = st.checkbox(" ", key=parent_key, label_visibility="collapsed")
-            with c2:
-                # colored bold label inline
-                st.markdown(f'<div class="cat-row"><span class="cat-label" style="color:{color}">{CATEGORY_LABELS.get(cat,cat)}</span></div>', unsafe_allow_html=True)
-            with c3:
-                # collapse toggle (native checkbox used as a toggle; starts expanded)
-                collapse_key = f"collapse_{cat}"
-                st.session_state.setdefault(collapse_key, st.session_state.collapsed.get(cat, False))
-                _ = st.checkbox("Collapse", key=collapse_key)  # visible label
-                st.session_state.collapsed[cat] = st.session_state[collapse_key]
-
-            # sync parent -> children defaults BEFORE creating child widgets
-            parent_val = st.session_state[parent_key]
-            if parent_val:
-                for i in idxs:
-                    st.session_state[f"hit_{i}"] = True
-            else:
-                for i in idxs:
-                    st.session_state.setdefault(f"hit_{i}", False)
-
-            # render children indented (if not collapsed)
-            if not st.session_state.collapsed[cat]:
-                for i in idxs:
-                    h = st.session_state.id_to_hit[i]
-                    child_key = f"hit_{i}"
-                    st.session_state.setdefault(child_key, (i in st.session_state.selected_hit_ids))
-                    # label includes small page metadata
-                    label = f"{h.text}  (p{h.page+1})"
-                    _ = st.checkbox(label, key=child_key)
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        # bottom: Select/Deselect All (Results)
-        def toggle_select_all_results():
-            all_ids = list(st.session_state.id_to_hit.keys())
-            if not all_ids:
-                return
-            if all(st.session_state.get(f"hit_{i}", False) for i in all_ids):
-                for i in all_ids:
-                    st.session_state[f"hit_{i}"] = False
-            else:
-                for i in all_ids:
-                    st.session_state[f"hit_{i}"] = True
-
-        st.button("Select / Deselect All (Results)", on_click=toggle_select_all_results)
-
-        # after all widgets created: derive selected_hit_ids from hit_{i} keys (authoritative)
-        new_selected: Set[int] = set()
-        for k, v in st.session_state.items():
-            if k.startswith("hit_"):
-                try:
-                    i = int(k.split("_", 1)[1])
-                except Exception:
-                    continue
-                if v:
-                    new_selected.add(i)
-        st.session_state.selected_hit_ids = new_selected
-
-        # download (final destructive black-box redaction)
-        if st.button("Download Redacted PDF"):
-            selected = [st.session_state.id_to_hit[i] for i in sorted(st.session_state.selected_hit_ids)]
-            out = redact_pdf_with_hits(st.session_state.file_bytes, selected, preview_mode=False)
-            st.download_button("Save redacted.pdf", data=out, file_name="redacted.pdf")
-
-    # RIGHT column: preview (same height)
     with right_col:
-        st.markdown("<h3>Preview</h3>", unsafe_allow_html=True)
-        selected = [st.session_state.id_to_hit[i] for i in sorted(st.session_state.selected_hit_ids)]
-        if selected:
-            preview_bytes = redact_pdf_with_hits(st.session_state.file_bytes, selected, preview_mode=True)
-            b64 = base64.b64encode(preview_bytes).decode("utf-8")
-            st.markdown(f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="{RESULT_HEIGHT_PX}px"></iframe>', unsafe_allow_html=True)
-        else:
-            st.info("No phrases selected — select items on the left to preview.")
+        st.markdown("### Preview")
+        if st.session_state.file_bytes:
+            selected_hits = [id_to_hit[i] for i in selected_hit_ids]
+            out_bytes = redact_pdf_with_hits(st.session_state.file_bytes, selected_hits, preview_mode=True)
+            b64_pdf = base64.b64encode(out_bytes).decode("utf-8")
+            st.markdown(
+                f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="520px"></iframe>',
+                unsafe_allow_html=True,
+            )
